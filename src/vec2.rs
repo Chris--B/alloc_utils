@@ -54,6 +54,38 @@ impl <'v, T> Vec<'v, T> {
         }
     }
 
+    pub fn insert(&mut self, index: usize, elem: T) -> VecResult<()> {
+        assert!(index <= self.len);
+        if self.cap == self.len {
+            self.grow()?;
+        }
+
+        unsafe {
+            if index < self.len {
+                ptr::copy(self.ptr.as_ptr().offset(index as isize),
+                          self.ptr.as_ptr().offset(index as isize + 1),
+                          self.len - index);
+            }
+            ptr::write(self.ptr.as_ptr().offset(index as isize), elem);
+            self.len += 1;
+        }
+
+        Ok(())
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        assert!(index < self.len);
+        let corpse;
+        unsafe {
+            self.len -= 1;
+            corpse = ptr::read(self.ptr.as_ptr().offset(index as isize));
+            ptr::copy(self.ptr.as_ptr().offset(index as isize + 1),
+                      self.ptr.as_ptr().offset(index as isize),
+                      self.len - index);
+        }
+        corpse
+    }
+
     fn grow(&mut self) -> VecResult<()> {
         // There's lots of room for error here, so let's call it all unsafe.
         unsafe {
@@ -237,6 +269,29 @@ mod t {
         assert_eq!(*data.borrow(), 0);
         mem::drop(v);
         assert_eq!(*data.borrow(), 9);
+    }
+
+    #[test]
+    fn check_insert_and_remove() {
+        let mut buf = [0u8; 128];
+        let mut alloc = StackAlloc::new(&mut buf);
+        let mut v = Vec::<u64>::new(&mut alloc);
+
+        v.push(2*1).expect("push(2*1) failed.");
+        v.push(2*2).expect("push(2*2) failed.");
+        v.push(2*3).expect("push(2*3) failed.");
+        v.push(2*4).expect("push(2*4) failed.");
+        v.push(2*5).expect("push(2*5) failed.");
+        v.push(2*6).expect("push(2*6) failed.");
+        v.push(2*7).expect("push(2*7) failed.");
+        assert_eq!(&[2, 4, 6, 8, 10, 12, 14], v.deref());
+
+        v.insert(3, 1001).expect("v.insert(3, 1001) failed.");
+        assert_eq!(&[2, 4, 6, 1001, 8, 10, 12, 14], v.deref());
+
+        let corpse = v.remove(4);
+        assert_eq!(&[2, 4, 6, 1001, 10, 12, 14], v.deref());
+        assert_eq!(corpse, 8);
     }
 
 }
