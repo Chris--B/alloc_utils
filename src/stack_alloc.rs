@@ -1,9 +1,22 @@
+
 use std::{
     alloc,
     result,
     ptr::NonNull,
 };
 
+/// A stack allocator which uses a supplied-slice as backing memory.
+///
+/// The user supplied slice can exist on the stack or heap, but it must outlive
+/// the allocator.
+/// Allocation requests are given exactly as much memory as they ask for, and
+/// can only be reused after being `dealloc`ed if they were the latest allocation
+/// made from this allocator.
+///
+/// (Note: If all allocations are `dealloc`ed in the exact,
+/// opposite order in which they were `alloc`ed, then all allocations can be
+/// reused for further memory requests.)
+#[derive(Debug)]
 pub struct StackAlloc<'a> {
     // The buffer backing allocations
     buf:  &'a [u8],
@@ -26,7 +39,7 @@ pub type StackAllocResult<T> = result::Result<T, StackAllocError>;
 
 impl <'a> StackAlloc<'a> {
 
-    // Create a new stack allcoator with a backing buffer.
+    /// Create a new stack allocator with a backing buffer.
     pub fn new(buf: &mut [u8]) -> StackAlloc {
         StackAlloc {
             buf,
@@ -35,18 +48,20 @@ impl <'a> StackAlloc<'a> {
         }
     }
 
-    // Resets the stack completely.
-    // This is unsafe because it marks all memory from this allocator as "free",
-    // even if there are still objects using this memory.
-    // It is the responsibility of the caller to ensure that this doesn't happen.
+    /// Resets the stack completely.
+    ///
+    /// This is unsafe because it marks all memory from this allocator as "free",
+    /// even if there are still objects using this memory.
+    /// It is the responsibility of the caller to ensure that this doesn't happen.
     pub unsafe fn reset(&mut self) {
         self.top = 0;
     }
 
-    // Resets the stack to a specified location.
-    // This is unsafe because it marks all memory from this allocator as "free",
-    // even if there are still objects using this memory.
-    // It is the responsibility of the caller to ensure that this doesn't happen.
+    /// Resets the stack to a specified location.
+    ///
+    /// This is unsafe because it marks all memory from this allocator as "free",
+    /// even if there are still objects using this memory.
+    /// It is the responsibility of the caller to ensure that this doesn't happen.
     pub unsafe fn reset_to(&mut self, marker: Marker) -> StackAllocResult<()> {
         if marker.0 < self.buf.len() &&
            marker.0 < self.top           // Don't reset "up".
@@ -58,32 +73,36 @@ impl <'a> StackAlloc<'a> {
         }
     }
 
-    // Create a marker that the stack can be reset to later.
+    /// Gets a marker that the stack can be reset to later.
     pub fn get_marker(&self) -> Marker {
         Marker(self.top)
     }
 
-    // Return the number of bytes currently allocated.
+    /// Gets the number of bytes currently allocated.
     pub fn bytes_in_use(&self) -> usize {
         self.top
     }
 
-    // Return the length of the backing buffer.
-    // This is the largest number that `bytes_in_use` can ever return.
+    /// Gets the length of the backing buffer.
+    ///
+    /// This is the largest number that `bytes_in_use` can ever return.
     pub fn capacity(&self) -> usize {
         self.buf.len()
     }
 
-    // The most bytes that have been in use by this allocator at one time,
-    // since its creation.
-    // This is not reset with calls to `reset()` or `reset_to()`.
+    /// Gets the "high water mark" of bytes that have been in use by this
+    /// allocator at any one time, since its creation.
+    ///
+    /// This is not reset with calls to `reset()` or `reset_to()`.
     pub fn high_water_mark(&self) -> usize {
         self.high
     }
 
-    // Provide immutable access to the underlaying buffer.
-    // This is useful because Rust's ownership model won't let us use
-    // the original, even if it's in scope.
+    /// Gets immutable access to the underlaying buffer.
+    ///
+    /// This can be used to peek at the buffer even with the allocator in use,
+    /// since construction of the allocator involves a mutable borrow that lives
+    /// as long as the allocator does.
     pub fn buf(&self) -> &[u32] {
         unsafe {
             use std::slice;
@@ -92,6 +111,7 @@ impl <'a> StackAlloc<'a> {
         }
     }
 
+    // Gets the index into self.buf at which the given pointer begins.
     fn get_block_idx(&self, ptr: NonNull<u8>) -> usize {
         ptr.as_ptr() as usize - self.buf.as_ptr() as usize
     }
@@ -103,10 +123,9 @@ unsafe impl <'a> alloc::Alloc for StackAlloc<'a> {
     fn usable_size(&self, layout: &alloc::Layout) -> (usize, usize) {
         // Our allocations are tight, and do not include any excess.
         // This also sets the guarantees for `layout.size()` in other calls.
-        // Namely, the caller is responsible for giving us a correct size with
-        // no wiggle room.
+        // The caller is responsible for giving us a correct size.
         // This lets us walk back from the top of the stack and free allocations
-        // if they are on top when `dealloc` is called.
+        // if they are on top when `dealloc` is called, without saving metadata.
         (layout.size(), layout.size())
     }
 

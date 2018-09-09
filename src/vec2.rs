@@ -12,6 +12,10 @@ use std::{
 // TODO: Failure crate
 type VecResult<T> = result::Result<T, alloc::AllocErr>;
 
+/// A grow-able and shrink-able dynamically sized array.
+///
+/// It differs from `std::vec::Vec` by storing its own allocator instead of
+/// using the global or system allocators.
 pub struct Vec<'v, T> {
     // We store a pointer to the allocator instead of a reference to get around
     // mutability restrictions.
@@ -28,6 +32,7 @@ pub struct Vec<'v, T> {
 
 impl <'v, T> Vec<'v, T> {
 
+    /// Construct a new Vec
     pub fn new(alloc: &mut (dyn alloc::Alloc + 'v)) -> Self {
         Vec {
             alloc: NonNull::new(alloc).unwrap(),
@@ -37,6 +42,7 @@ impl <'v, T> Vec<'v, T> {
         }
     }
 
+    /// Move `elem` into the Vec, returning any allocation errors.
     pub fn push(&mut self, elem: T) -> VecResult<()> {
         if self.len == self.cap {
             self.grow()?;
@@ -48,6 +54,9 @@ impl <'v, T> Vec<'v, T> {
         Ok(())
     }
 
+    /// Move the elem at the end of the Vec out, returning it.
+    ///
+    /// Returns `None` if the Vec is empty.
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
             None
@@ -59,6 +68,8 @@ impl <'v, T> Vec<'v, T> {
         }
     }
 
+    /// Move `elem` into the Vec at index `index`, moving any elements if needed
+    /// and returning any allocation errors.
     pub fn insert(&mut self, index: usize, elem: T) -> VecResult<()> {
         assert!(index <= self.len);
         if self.cap == self.len {
@@ -78,6 +89,7 @@ impl <'v, T> Vec<'v, T> {
         Ok(())
     }
 
+    /// Moves `elem` out of the Vec and shifts all elements over to fill its spot.
     pub fn remove(&mut self, index: usize) -> T {
         assert!(index < self.len);
         let corpse;
@@ -91,10 +103,12 @@ impl <'v, T> Vec<'v, T> {
         corpse
     }
 
+    /// Returns a slice of the Vec's elements
     pub fn as_slice(&self) -> &[T] {
         self
     }
 
+    /// Returns the mutable slice of the Vec's elements
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         self
     }
