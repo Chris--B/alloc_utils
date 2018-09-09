@@ -5,20 +5,20 @@ use std::{
 };
 
 pub struct StackAlloc<'a> {
-    _buf:  &'a [u8],
+    buf:  &'a [u8],
     top:  usize,
-    _high: usize,
+    high: usize,
 }
 
 pub struct Marker(usize);
 
 impl <'a> StackAlloc<'a> {
 
-    pub fn new(_buf: &mut [u8]) -> StackAlloc {
+    pub fn new(buf: &mut [u8]) -> StackAlloc {
         StackAlloc {
-            _buf,
+            buf,
             top:  0,
-            _high: 0,
+            high: 0,
         }
     }
 
@@ -30,15 +30,41 @@ impl <'a> StackAlloc<'a> {
 
 unsafe impl <'a> alloc::Alloc for StackAlloc<'a> {
 
-    unsafe fn alloc(&mut self, _layout: alloc::Layout)
+    unsafe fn alloc(&mut self, layout: alloc::Layout)
         -> result::Result<NonNull<u8>, alloc::AllocErr>
     {
-        // Adjust top for alignment
-        // Save that top as the returned pointer
-        // Adjust top for the size
-        // Check bounds
-        // If Ok(), return saved top
-        Ok(NonNull::<u8>::dangling()) // lol bad idea
+        if self.top == self.buf.len() {
+            return Err(alloc::AllocErr);
+        }
+
+        let     block_base = &self.buf[self.top] as *const u8 as usize;
+        let     buf_base   = &self.buf[0]        as *const u8 as usize;
+
+        if block_base & (layout.align() - 1) != 0 {
+            // TODO: Adjust instead of panicing!
+            panic!("Bad alignment that I should fix.");
+        }
+        // This is the pointer that the caller will receive, if we have room.
+        // We got it by indexing into self.buf, so we know it can't be null.
+        let ptr = NonNull::new_unchecked(block_base as *mut u8);
+
+        let block_base_idx = block_base - buf_base;
+        match (block_base_idx, block_base_idx.checked_add(layout.size())) {
+            (block, Some(new_top)) if (block   <  self.buf.len() &&
+                                       new_top <= self.buf.len()) =>
+            {
+                // Our allocated block is in bounds, and so is the new top!
+                // Everything is good, so let's save our changes and return
+                // the new pointer.
+                self.top = new_top;
+                self.high = self.high.max(self.top);
+                Ok(ptr)
+            },
+            _ => {
+                // We do not have enough space to satisfy this allocation.
+                Err(alloc::AllocErr)
+            },
+        }
     }
 
     unsafe fn dealloc(&mut self, _ptr: NonNull<u8>, _layout: alloc::Layout) {
@@ -126,7 +152,7 @@ mod t {
                     R::from_result(&allocs[3]),
                 ];
 
-                assert_eq!(expected_tags, actual_tags);
+                assert_eq!(actual_tags, expected_tags);
 
                 ptrs = [
                     allocs[0].clone().unwrap(),
@@ -136,22 +162,21 @@ mod t {
 
             assert_ne!(NonNull::dangling(), ptrs[0]);
             assert_ne!(ptrs[0], ptrs[1]);
-
         }
 
         // Unsafe due to dereferencing pointers.
         unsafe {
             let a: &mut u32 = (ptrs[0].as_ptr() as *mut u32).as_mut().unwrap();
-            *a = 0x00;
-            assert_eq!(buf[0], *a as u8);
-            *a = 0xff;
-            assert_eq!(buf[0], *a as u8);
+            *a = 23;
+            assert_eq!(*a as u8, buf[0]);
+            *a = 45;
+            assert_eq!(*a as u8, buf[0]);
 
             let b: &mut u32 = (ptrs[1].as_ptr() as *mut u32).as_mut().unwrap();
-            *b = 0x00;
-            assert_eq!(buf[1], *b as u8);
-            *b = 0xff;
-            assert_eq!(buf[1], *b as u8);
+            *b = 23;
+            assert_eq!(*b as u8, buf[4]);
+            *b = 45;
+            assert_eq!(*b as u8, buf[4]);
         }
     }
 
