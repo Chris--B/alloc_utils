@@ -4,3 +4,6 @@ version = "0.1.0"
 authors = ["Chris Butler <chrisbutler296@gmail.com>"]
 
 [dependencies]
+
+[dev-dependencies]
+pretty_assertions = '*'

@@ -58,7 +58,6 @@ mod t {
     use super::*;
     use std::{
         alloc::Alloc,
-        iter::Iterator,
         mem::size_of,
     };
 

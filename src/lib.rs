@@ -2,6 +2,10 @@
 
 #![deny(warnings)]
 
+#[cfg(test)]
+#[macro_use]
+extern crate pretty_assertions;
+
 use std::{
     alloc,
     ops,
