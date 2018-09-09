@@ -10,10 +10,20 @@ pub struct StackAlloc<'a> {
     high: usize,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Marker(usize);
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum StackAllocError {
+    // There was an attempt to reset the stack to a marker which is not valid.
+    InvalidMarker,
+}
+
+pub type StackAllocResult<T> = result::Result<T, StackAllocError>;
 
 impl <'a> StackAlloc<'a> {
 
+    // Create a new stack allcoator with a backing buffer.
     pub fn new(buf: &mut [u8]) -> StackAlloc {
         StackAlloc {
             buf,
@@ -22,8 +32,40 @@ impl <'a> StackAlloc<'a> {
         }
     }
 
+    // Resets the stack completely.
+    // This is unsafe because it marks all memory from this allocator as "free",
+    // even if there are still objects using this memory.
+    // It is the responsibility of the caller to ensure that this doesn't happen.
+    pub unsafe fn reset(&mut self) {
+        self.top = 0;
+    }
+
+    // Resets the stack to a specified location.
+    // This is unsafe because it marks all memory from this allocator as "free",
+    // even if there are still objects using this memory.
+    // It is the responsibility of the caller to ensure that this doesn't happen.
+    pub unsafe fn reset_to(&mut self, marker: Marker) -> StackAllocResult<()> {
+        if marker.0 < self.buf.len() &&
+           marker.0 < self.top           // Don't reset "up".
+        {
+            self.top = marker.0;
+            Ok(())
+        } else {
+            Err(StackAllocError::InvalidMarker)
+        }
+    }
+
+    // Create a marker that the stack can be reset to later.
     pub fn get_marker(&self) -> Marker {
         Marker(self.top)
+    }
+
+    pub fn bytes_in_use(&self) -> usize {
+        self.top
+    }
+
+    pub fn high_water_mark(&self) -> usize {
+        self.high
     }
 
 }
@@ -72,8 +114,27 @@ unsafe impl <'a> alloc::Alloc for StackAlloc<'a> {
         //       If this layout and ptr are at the top of the stack, we can
         //       dealloc it.
         //       Otherwise we can't do anything, ever.
-        //       We could keep track of which sections are allocated or not...
         () // Do nothing.
+    }
+
+    // ----- These may be useful to implement later. ----------------------------
+
+    unsafe fn grow_in_place(&mut self,
+                            _ptr:      NonNull<u8>,
+                            _layout:   alloc::Layout,
+                            _new_size: usize)
+        -> result::Result<(), alloc::CannotReallocInPlace>
+    {
+        Err(alloc::CannotReallocInPlace)
+    }
+
+    unsafe fn shrink_in_place(&mut self,
+                              _ptr:      NonNull<u8>,
+                              _layout:   alloc::Layout,
+                              _new_size: usize)
+        -> result::Result<(), alloc::CannotReallocInPlace>
+    {
+        Err(alloc::CannotReallocInPlace)
     }
 
 }

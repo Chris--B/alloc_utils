@@ -13,13 +13,17 @@ use std::{
         self,
         NonNull,
     },
+    result,
     slice,
 };
 
 pub mod stack_alloc;
 
+// TODO: Failure crate
+type VecResult<T> = result::Result<T, alloc::AllocErr>;
+
 pub struct Vec<'alloc, T> {
-    ptr:  NonNull<T>,
+    ptr:   NonNull<T>,
     cap:   usize,
     len:   usize,
     alloc: &'alloc mut dyn alloc::Alloc,
@@ -37,14 +41,15 @@ impl <'alloc, T> Vec<'alloc, T>
         }
     }
 
-    pub fn push(&mut self, elem: T) {
+    pub fn push(&mut self, elem: T) -> VecResult<()> {
         if self.len == self.cap {
-            self.grow();
+            self.grow()?;
         }
         unsafe {
             ptr::write(self.ptr.as_ptr().offset(self.len as isize), elem);
         }
         self.len += 1;
+        Ok(())
     }
 
     pub fn pop(&mut self) -> Option<T> {
@@ -58,26 +63,29 @@ impl <'alloc, T> Vec<'alloc, T>
         }
     }
 
-    fn grow(&mut self) {
+    fn grow(&mut self) -> VecResult<()> {
         // There's lots of room for error here, so let's call it all unsafe.
-        // unsafe {
-        {
+        unsafe {
             let new_cap: usize;
             let new_ptr: NonNull<T>;
+            let layout: alloc::Layout;
 
             if self.cap == 0 {
                 new_cap = 1;
-                // new_ptr = self.alloc.alloc_array(1).unwrap();
+                layout  = alloc::Layout::array::<T>(new_cap).unwrap();
+                new_ptr = self.alloc.alloc(layout)?.cast();
             } else {
                 new_cap = 2 * self.cap;
-                // new_ptr = self.alloc.
-                //             realloc_array(self.ptr, self.cap, new_cap).unwrap();
+                layout  = alloc::Layout::array::<T>(new_cap).unwrap();
+                new_ptr = self.alloc.realloc(self.ptr.cast(),
+                                             layout,
+                                             layout.size())?.cast();
             }
-            new_ptr = self.ptr;
 
             self.cap = new_cap;
             self.ptr = new_ptr;
         }
+        Ok(())
     }
 
 }
@@ -121,7 +129,7 @@ impl <'alloc, T> ops::DerefMut for Vec<'alloc, T> {
 
 }
 
-#[cfg(test2)]
+#[cfg(test)]
 mod t {
 
     use super::*;
@@ -134,10 +142,10 @@ mod t {
     };
 
     #[test]
-    fn check_new_and_drop() {
-        let mut buf = [0u8; 43];
+    fn check_alloc_ownership() {
+        let mut buf = [0u8; 43]; // Room for 10 u32s, and extra space.
         let mut alloc = StackAlloc::new(&mut buf);
-        // Use scope to trigger drops, because NLL are a pipe dream.
+        // Someday, NLL will eliminate the need for scopes here.
         {
             let _ = Vec::<u32>::new(&mut alloc);
         }
@@ -148,44 +156,26 @@ mod t {
     }
 
     #[test]
-    fn check_push_alloc() {
-        let mut buf = [0u8; 43];
-        let mut alloc = StackAlloc::new(&mut buf);
-        let mut v = Vec::<u32>::new(&mut alloc);
-
-        // Only trigger one alloc.
-        v.push(1);
-
-        assert_eq!(v.deref(), &[1]);
-
-        // Don't drop this value. This is OK because...
-        //      1) All allocation here happens on the stack, so nothing leaks.
-        //      2) We're not testing pop() here, which Drop calls repeatedly.
-        mem::forget(v);
-    }
-
-    #[test]
-    fn check_push_realloc() {
+    fn check_one_push_works() {
         let mut buf = [0u8; 43]; // Room for 10 u32s, and extra space.
         let mut alloc = StackAlloc::new(&mut buf);
         let mut v = Vec::<u32>::new(&mut alloc);
+        v.push(1).expect("v.push(1) failed.");
 
-        // Trigger at least one realloc.
-        v.push(1);
-        v.push(2);
-        v.push(3);
-        v.push(4);
-        v.push(5);
-
-        assert_eq!(v.deref(), &[1, 2, 3, 4, 5]);
-
-        // Don't drop this value. This is OK because...
-        //      1) All allocation here happens on the stack, so nothing leaks.
-        //      2) We're not testing pop() here, which Drop calls repeatedly.
-        mem::forget(v);
+        assert_eq!(v.deref(), &[1]);
     }
 
     #[test]
-    fn check_push_pop() {}
+    fn check_many_pushes_all_work() {
+        let mut buf = [0u8; 43]; // Room for 10 u32s, and extra space.
+        let mut alloc = StackAlloc::new(&mut buf);
+        let mut v = Vec::<u32>::new(&mut alloc);
+        v.push(1).expect("v.push(1) failed.");
+        v.push(2).expect("v.push(2) failed.");
+        v.push(3).expect("v.push(3) failed.");
+        v.push(4).expect("v.push(4) failed.");
+
+        assert_eq!(v.deref(), &[1, 2, 3, 4]);
+    }
 
 }
