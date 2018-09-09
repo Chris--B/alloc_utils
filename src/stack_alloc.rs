@@ -194,7 +194,6 @@ unsafe impl <'a> alloc::Alloc for StackAlloc<'a> {
         //      2) The block in question is at the top of the stack
         // So we can go ahead and bump self.top and call it success.
         self.top += block_growth;
-        println!("new top: {}", self.top);
         Ok(())
     }
 

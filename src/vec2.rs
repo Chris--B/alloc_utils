@@ -15,9 +15,9 @@ type VecResult<T> = result::Result<T, alloc::AllocErr>;
 pub struct Vec<'v, T> {
     alloc: NonNull<alloc::Alloc + 'v>,
     ptr:   NonNull<T>,
-    // The capacity of our buffer, in bytes.
+    // How many Ts we can hold without growing.
     cap:   usize,
-    // The number of T objects initialized.
+    // How many Ts we have initialized.
     len:   usize,
 }
 
@@ -59,26 +59,26 @@ impl <'v, T> Vec<'v, T> {
         unsafe {
             let new_cap: usize;
             let new_ptr: NonNull<T>;
-            let layout: alloc::Layout;
+            let layout:  alloc::Layout;
 
             if self.cap == 0 {
-                new_cap = alloc::Layout::new::<T>().size();
+                new_cap = 1;
                 layout  = alloc::Layout::array::<T>(new_cap).unwrap();
                 new_ptr = self.alloc.as_mut().alloc(layout)?.cast();
             } else {
                 // layout must refer to the *existing* allocation.
-                new_cap = 2 * self.cap;
                 layout  = alloc::Layout::array::<T>(self.cap).unwrap();
+                new_cap = 2 * self.cap;
 
                 if let Ok(_) = self.alloc.as_mut().grow_in_place(self.ptr.cast(),
                                                                  layout,
-                                                                 new_cap)
+                                                                 2 * layout.size())
                 {
                     new_ptr = self.ptr;
                 } else {
                     new_ptr = self.alloc.as_mut().realloc(self.ptr.cast(),
                                                           layout,
-                                                          new_cap)?.cast();
+                                                          2 * layout.size())?.cast();
                 }
             }
 
@@ -135,25 +135,25 @@ mod t {
     use super::*;
     use stack_alloc::StackAlloc;
 
-    #[allow(unused_imports)]
     use std::{
+        cell,
         mem,
         ops::Deref,
     };
 
-    #[test]
-    fn check_alloc_ownership() {
-        let mut buf = [0u8; 43]; // Room for 10 u32s, and extra space.
-        let mut alloc = StackAlloc::new(&mut buf);
-        // Someday, NLL will eliminate the need for scopes here.
-        {
-            let _ = Vec::<u32>::new(&mut alloc);
-        }
-        // Make sure we can reuse the alloc.
-        {
-            let _ = Vec::<u32>::new(&mut alloc);
-        }
+    // A helper type that increments shared data when it is dropped.
+    struct DropMe<'a> {
+        data: &'a cell::RefCell<u32>,
     }
+
+    impl <'a> Drop for DropMe<'a> {
+
+        fn drop(&mut self) {
+            *self.data.borrow_mut() += 1;
+        }
+
+    }
+
 
     #[test]
     fn check_one_push_works() {
@@ -214,6 +214,29 @@ mod t {
 
         assert_eq!(&[1, 2, 3, 4],     v.deref());
         assert_eq!(&[11, 22, 33, 44], w.deref());
+    }
+
+    #[test]
+    fn check_drop_called() {
+        let mut buf = [0u8; 128];
+        let mut alloc = StackAlloc::new(&mut buf);
+
+        let data = &cell::RefCell::new(0);
+
+        let mut v = Vec::<DropMe>::new(&mut alloc);
+        v.push(DropMe { data }).expect("push(..) failed.");
+        v.push(DropMe { data }).expect("push(..) failed.");
+        v.push(DropMe { data }).expect("push(..) failed.");
+        v.push(DropMe { data }).expect("push(..) failed.");
+        v.push(DropMe { data }).expect("push(..) failed.");
+        v.push(DropMe { data }).expect("push(..) failed.");
+        v.push(DropMe { data }).expect("push(..) failed.");
+        v.push(DropMe { data }).expect("push(..) failed.");
+        v.push(DropMe { data }).expect("push(..) failed.");
+
+        assert_eq!(*data.borrow(), 0);
+        mem::drop(v);
+        assert_eq!(*data.borrow(), 9);
     }
 
 }
