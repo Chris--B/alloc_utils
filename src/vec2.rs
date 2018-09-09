@@ -13,12 +13,17 @@ use std::{
 type VecResult<T> = result::Result<T, alloc::AllocErr>;
 
 pub struct Vec<'v, T> {
+    // We store a pointer to the allocator instead of a reference to get around
+    // mutability restrictions.
+    // We cannot have the Vec exercise unilateral control over the allocator,
+    // as we expect
+    //  (1) other collections to use the same allocator, and
+    //  (2) callers to interact with the allocator while the Vec does too.
+    // We do still have lifetime guarantees, however.
     alloc: NonNull<alloc::Alloc + 'v>,
-    ptr:   NonNull<T>,
-    // How many Ts we can hold without growing.
-    cap:   usize,
-    // How many Ts we have initialized.
-    len:   usize,
+    ptr:   NonNull<T>, // Pointer to Ts
+    cap:   usize,      // How many Ts we can hold without growing.
+    len:   usize,      // How many Ts we have initialized.
 }
 
 impl <'v, T> Vec<'v, T> {
@@ -84,6 +89,14 @@ impl <'v, T> Vec<'v, T> {
                       self.len - index);
         }
         corpse
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        self
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        self
     }
 
     fn grow(&mut self) -> VecResult<()> {
@@ -170,7 +183,6 @@ mod t {
     use std::{
         cell,
         mem,
-        ops::Deref,
     };
 
     // A helper type that increments shared data when it is dropped.
@@ -194,7 +206,7 @@ mod t {
         let mut v = Vec::<u32>::new(&mut alloc);
         v.push(1).expect("v.push(1) failed.");
 
-        assert_eq!(v.deref(), &[1]);
+        assert_eq!(v.as_slice(), &[1]);
     }
 
     #[test]
@@ -208,7 +220,7 @@ mod t {
         v.push(4).expect("v.push(4) failed.");
 
         assert!(alloc.high_water_mark() > 0);
-        assert_eq!(v.deref(), &[1, 2, 3, 4]);
+        assert_eq!(v.as_slice(), &[1, 2, 3, 4]);
     }
 
     #[test]
@@ -244,8 +256,8 @@ mod t {
         println!("[44] {:?}",  alloc.buf());
         println!("");
 
-        assert_eq!(&[1, 2, 3, 4],     v.deref());
-        assert_eq!(&[11, 22, 33, 44], w.deref());
+        assert_eq!(&[1, 2, 3, 4],     v.as_slice());
+        assert_eq!(&[11, 22, 33, 44], w.as_slice());
     }
 
     #[test]
@@ -284,13 +296,13 @@ mod t {
         v.push(2*5).expect("push(2*5) failed.");
         v.push(2*6).expect("push(2*6) failed.");
         v.push(2*7).expect("push(2*7) failed.");
-        assert_eq!(&[2, 4, 6, 8, 10, 12, 14], v.deref());
+        assert_eq!(&[2, 4, 6, 8, 10, 12, 14], v.as_slice());
 
         v.insert(3, 1001).expect("v.insert(3, 1001) failed.");
-        assert_eq!(&[2, 4, 6, 1001, 8, 10, 12, 14], v.deref());
+        assert_eq!(&[2, 4, 6, 1001, 8, 10, 12, 14], v.as_slice());
 
         let corpse = v.remove(4);
-        assert_eq!(&[2, 4, 6, 1001, 10, 12, 14], v.deref());
+        assert_eq!(&[2, 4, 6, 1001, 10, 12, 14], v.as_slice());
         assert_eq!(corpse, 8);
     }
 
