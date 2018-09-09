@@ -58,7 +58,7 @@ mod t {
     use super::*;
     use std::{
         alloc::Alloc,
-        mem::size_of,
+        mem,
     };
 
     // Used to tag whether something should be Ok(..) or Err(..), but without
@@ -82,42 +82,77 @@ mod t {
 
     #[test]
     fn check_simple_alloc() {
-        let mut buf = [0u8; 2 * size_of::<u32>()];
+        let mut buf = [0u8; 2 * mem::size_of::<u32>()];
         let buf_len = buf.len(); // Good job borrow checker!
-        let mut alloc = StackAlloc::new(&mut buf);
 
-        let layout = alloc::Layout::new::<u32>();
-        // This *should* be knowable at compile time, but Rust isn't there yet.
-        assert_eq!(2 * layout.size(), buf_len);
+        // The pointers we expect to be valid are saved here, and used at the
+        // end of the function.
+        let ptrs: [NonNull<u8>; 2];
 
-        // We expect two allocations to work, and then two to fail.
-        // Failure should *not* abort the test!
-        let ptr_pairs;
-        unsafe {
-            ptr_pairs = [
-                (alloc.alloc(layout), R::Ok),
-                (alloc.alloc(layout), R::Ok),
+        // NLL cannot come quickly enough.
+        // Force alloc to drop before we check our pointers at the end, because
+        // alloc &muts buf, and we need to read buf to check the tests.
+        // Some day, this can just use a mem::forget() call instead of scoping.
+        {
+            let mut alloc = StackAlloc::new(&mut buf);
 
-                (alloc.alloc(layout), R::Err),
-                (alloc.alloc(layout), R::Err),
-            ];
+            let layout = alloc::Layout::new::<u32>();
+            // This *should* be knowable at compile time, but Rust isn't there yet.
+            assert_eq!(2 * layout.size(), buf_len);
 
-            // Some day...
-            //      let tags: impl Iterator<Item=R>
-            //      And assert_eq can just run through the iterator.
-            // Until then:
-            // Note that we use std::Vec here, with the global allocator.
-            let expected_tags: Vec<R> = ptr_pairs
-                .iter()
-                .map(|pair| pair.1)
-                .collect();
-            let actual_tags: Vec<R>   = ptr_pairs
-                .iter()
-                .map(|pair| R::from_result(&pair.0))
-                .collect();
-            assert_eq!(expected_tags, actual_tags);
+            // We expect two allocations to work, and then two to fail.
+            // Failure should *not* abort the test!
+            // unsafe due to calls to alloc::Alloc::alloc().
+            unsafe {
+                let allocs = [
+                    alloc.alloc(layout),
+                    alloc.alloc(layout),
+
+                    alloc.alloc(layout),
+                    alloc.alloc(layout),
+                ];
+
+                let expected_tags = [
+                    R::Ok,
+                    R::Ok,
+                    R::Err,
+                    R::Err,
+                ];
+
+                let actual_tags = [
+                    R::from_result(&allocs[0]),
+                    R::from_result(&allocs[1]),
+                    R::from_result(&allocs[2]),
+                    R::from_result(&allocs[3]),
+                ];
+
+                assert_eq!(expected_tags, actual_tags);
+
+                ptrs = [
+                    allocs[0].clone().unwrap(),
+                    allocs[1].clone().unwrap(),
+                ];
+            }
+
+            assert_ne!(NonNull::dangling(), ptrs[0]);
+            assert_ne!(ptrs[0], ptrs[1]);
+
         }
 
+        // Unsafe due to dereferencing pointers.
+        unsafe {
+            let a: &mut u32 = (ptrs[0].as_ptr() as *mut u32).as_mut().unwrap();
+            *a = 0x00;
+            assert_eq!(buf[0], *a as u8);
+            *a = 0xff;
+            assert_eq!(buf[0], *a as u8);
+
+            let b: &mut u32 = (ptrs[1].as_ptr() as *mut u32).as_mut().unwrap();
+            *b = 0x00;
+            assert_eq!(buf[1], *b as u8);
+            *b = 0xff;
+            assert_eq!(buf[1], *b as u8);
+        }
     }
 
 }
