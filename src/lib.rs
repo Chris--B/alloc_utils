@@ -9,9 +9,10 @@ use std::{
         self,
         NonNull,
     },
-    result,
     slice,
 };
+
+pub mod stack_alloc;
 
 pub struct Vec<'alloc, T> {
     ptr:  NonNull<T>,
@@ -55,7 +56,7 @@ impl <'alloc, T> Vec<'alloc, T>
 
     fn grow(&mut self) {
         // There's lots of room for error here, so let's call it all unsafe.
-        // unsafe
+        // unsafe {
         {
             let new_cap: usize;
             let new_ptr: NonNull<T>;
@@ -116,63 +117,22 @@ impl <'alloc, T> ops::DerefMut for Vec<'alloc, T> {
 
 }
 
-
-pub struct SliceAlloc<'a> {
-    _buf:  &'a [u8],
-    _top:  usize,
-    _high: usize,
-}
-
-impl <'a> SliceAlloc<'a> {
-
-    pub fn new(_buf: &[u8]) -> SliceAlloc {
-        SliceAlloc {
-            _buf,
-            _top:  0,
-            _high: 0,
-        }
-    }
-
-}
-
-unsafe impl <'a> alloc::Alloc for SliceAlloc<'a> {
-
-    unsafe fn alloc(&mut self, _layout: alloc::Layout)
-        -> result::Result<NonNull<u8>, alloc::AllocErr>
-    {
-        // Adjust top for alignment
-        // Save that top as the returned pointer
-        // Adjust top for the size
-        // Check bounds
-        // If Ok(), return saved top
-        Ok(NonNull::<u8>::dangling()) // lol bad idea
-    }
-
-    unsafe fn dealloc(&mut self, _ptr: NonNull<u8>, _layout: alloc::Layout) {
-        // TODO: Check if this allocation is the last one made.
-        //       If this layout and ptr are at the top of the stack, we can
-        //       dealloc it.
-        //       Otherwise we can't do anything, ever.
-        //       We could keep track of which sections are allocated or not...
-        () // Do nothing.
-    }
-
-}
-
-#[cfg(test)]
+#[cfg(test2)]
 mod t {
 
     use super::*;
+    use stack_alloc::StackAlloc;
 
     #[allow(unused_imports)]
     use std::{
+        mem,
         ops::Deref,
     };
 
     #[test]
     fn check_new_and_drop() {
-        let buf = [0u8; 43];
-        let mut alloc = SliceAlloc::new(&buf);
+        let mut buf = [0u8; 43];
+        let mut alloc = StackAlloc::new(&mut buf);
         // Use scope to trigger drops, because NLL are a pipe dream.
         {
             let _ = Vec::<u32>::new(&mut alloc);
@@ -185,23 +145,28 @@ mod t {
 
     #[test]
     fn check_push_alloc() {
-        let buf = [0u8; 43];
-        let mut alloc = SliceAlloc::new(&buf);
+        let mut buf = [0u8; 43];
+        let mut alloc = StackAlloc::new(&mut buf);
         let mut v = Vec::<u32>::new(&mut alloc);
 
         // Only trigger one alloc.
         v.push(1);
 
         assert_eq!(v.deref(), &[1]);
+
+        // Don't drop this value. This is OK because...
+        //      1) All allocation here happens on the stack, so nothing leaks.
+        //      2) We're not testing pop() here, which Drop calls repeatedly.
+        mem::forget(v);
     }
 
     #[test]
     fn check_push_realloc() {
-        let buf = [0u8; 43]; // Room for 10 u32s, and extra space.
-        let mut alloc = SliceAlloc::new(&buf);
+        let mut buf = [0u8; 43]; // Room for 10 u32s, and extra space.
+        let mut alloc = StackAlloc::new(&mut buf);
         let mut v = Vec::<u32>::new(&mut alloc);
 
-        // Trigger at least realloc.
+        // Trigger at least one realloc.
         v.push(1);
         v.push(2);
         v.push(3);
@@ -209,6 +174,14 @@ mod t {
         v.push(5);
 
         assert_eq!(v.deref(), &[1, 2, 3, 4, 5]);
+
+        // Don't drop this value. This is OK because...
+        //      1) All allocation here happens on the stack, so nothing leaks.
+        //      2) We're not testing pop() here, which Drop calls repeatedly.
+        mem::forget(v);
     }
+
+    #[test]
+    fn check_push_pop() {}
 
 }
