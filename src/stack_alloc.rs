@@ -60,8 +60,14 @@ impl <'a> StackAlloc<'a> {
         Marker(self.top)
     }
 
+    // Return the number of bytes currently allocated.
     pub fn bytes_in_use(&self) -> usize {
         self.top
+    }
+
+    // Return the length of the backing buffer.
+    pub fn capacity(&self) -> usize {
+        self.buf.len()
     }
 
     pub fn high_water_mark(&self) -> usize {
@@ -170,7 +176,6 @@ mod t {
     #[test]
     fn check_simple_alloc() {
         let mut buf = [0u8; 2 * mem::size_of::<u32>()];
-        let buf_len = buf.len(); // Good job borrow checker!
 
         // The pointers we expect to be valid are saved here, and used at the
         // end of the function.
@@ -185,7 +190,7 @@ mod t {
 
             let layout = alloc::Layout::new::<u32>();
             // This *should* be knowable at compile time, but Rust isn't there yet.
-            assert_eq!(2 * layout.size(), buf_len);
+            assert_eq!(2 * layout.size(), alloc.capacity());
 
             // We expect two allocations to work, and then two to fail.
             // Failure should *not* abort the test!
