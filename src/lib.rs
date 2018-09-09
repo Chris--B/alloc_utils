@@ -25,7 +25,9 @@ type VecResult<T> = result::Result<T, alloc::AllocErr>;
 pub struct Vec<'v, T> {
     alloc: NonNull<alloc::Alloc + 'v>,
     ptr:   NonNull<T>,
+    // The capacity of our buffer, in bytes.
     cap:   usize,
+    // The number of T objects initialized.
     len:   usize,
 }
 
@@ -70,15 +72,24 @@ impl <'v, T> Vec<'v, T> {
             let layout: alloc::Layout;
 
             if self.cap == 0 {
-                new_cap = 1;
+                new_cap = alloc::Layout::new::<T>().size();
                 layout  = alloc::Layout::array::<T>(new_cap).unwrap();
                 new_ptr = self.alloc.as_mut().alloc(layout)?.cast();
             } else {
+                // layout must refer to the *existing* allocation.
                 new_cap = 2 * self.cap;
-                layout  = alloc::Layout::array::<T>(new_cap).unwrap();
-                new_ptr = self.alloc.as_mut().realloc(self.ptr.cast(),
-                                             layout,
-                                             layout.size())?.cast();
+                layout  = alloc::Layout::array::<T>(self.cap).unwrap();
+
+                if let Ok(_) = self.alloc.as_mut().grow_in_place(self.ptr.cast(),
+                                                                 layout,
+                                                                 new_cap)
+                {
+                    new_ptr = self.ptr;
+                } else {
+                    new_ptr = self.alloc.as_mut().realloc(self.ptr.cast(),
+                                                          layout,
+                                                          new_cap)?.cast();
+                }
             }
 
             self.cap = new_cap;
@@ -185,21 +196,34 @@ mod t {
         let mut v = Vec::<u32>::new(&mut alloc);
         let mut w = Vec::<u32>::new(&mut alloc);
 
+        println!("[]   {:?}",  alloc.buf());
+
         v.push(1).expect("v.push(1) failed.");
+        println!("[1]  {:?}",  alloc.buf());
         w.push(11).expect("w.push(11) failed.");
+        println!("[11] {:?}",  alloc.buf());
+        println!("");
 
         v.push(2).expect("v.push(2) failed.");
+        println!("[2]  {:?}",  alloc.buf());
         w.push(22).expect("w.push(22) failed.");
+        println!("[22] {:?}",  alloc.buf());
+        println!("");
 
         v.push(3).expect("v.push(3) failed.");
+        println!("[3]  {:?}",  alloc.buf());
         w.push(33).expect("w.push(33) failed.");
+        println!("[33] {:?}",  alloc.buf());
+        println!("");
 
         v.push(4).expect("v.push(4) failed.");
+        println!("[4]  {:?}",  alloc.buf());
         w.push(44).expect("w.push(44) failed.");
+        println!("[44] {:?}",  alloc.buf());
+        println!("");
 
-        assert_eq!(v.deref(), &[1, 2, 3, 4]);
-        assert_eq!(w.deref(), &[11, 22, 33, 44]);
-        assert_eq!(alloc.bytes_in_use(), alloc.capacity());
+        assert_eq!(&[1, 2, 3, 4],     v.deref());
+        assert_eq!(&[11, 22, 33, 44], w.deref());
     }
 
 }

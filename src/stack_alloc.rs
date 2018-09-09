@@ -5,8 +5,11 @@ use std::{
 };
 
 pub struct StackAlloc<'a> {
+    // The buffer backing allocations
     buf:  &'a [u8],
+    // The current top of the stack as an index into buf.
     top:  usize,
+    // The high water mark of the allocator, as an index into buf.
     high: usize,
 }
 
@@ -66,17 +69,46 @@ impl <'a> StackAlloc<'a> {
     }
 
     // Return the length of the backing buffer.
+    // This is the largest number that `bytes_in_use` can ever return.
     pub fn capacity(&self) -> usize {
         self.buf.len()
     }
 
+    // The most bytes that have been in use by this allocator at one time,
+    // since its creation.
+    // This is not reset with calls to `reset()` or `reset_to()`.
     pub fn high_water_mark(&self) -> usize {
         self.high
+    }
+
+    // Provide immutable access to the underlaying buffer.
+    // This is useful because Rust's ownership model won't let us use
+    // the original, even if it's in scope.
+    pub fn buf(&self) -> &[u32] {
+        unsafe {
+            use std::slice;
+            slice::from_raw_parts(self.buf.as_ptr() as *const u32,
+                                  self.buf.len() / 4)
+        }
+    }
+
+    fn get_block_idx(&self, ptr: NonNull<u8>) -> usize {
+        ptr.as_ptr() as usize - self.buf.as_ptr() as usize
     }
 
 }
 
 unsafe impl <'a> alloc::Alloc for StackAlloc<'a> {
+
+    fn usable_size(&self, layout: &alloc::Layout) -> (usize, usize) {
+        // Our allocations are tight, and do not include any excess.
+        // This also sets the guarantees for `layout.size()` in other calls.
+        // Namely, the caller is responsible for giving us a correct size with
+        // no wiggle room.
+        // This lets us walk back from the top of the stack and free allocations
+        // if they are on top when `dealloc` is called.
+        (layout.size(), layout.size())
+    }
 
     unsafe fn alloc(&mut self, layout: alloc::Layout)
         -> result::Result<NonNull<u8>, alloc::AllocErr>
@@ -85,13 +117,10 @@ unsafe impl <'a> alloc::Alloc for StackAlloc<'a> {
             return Err(alloc::AllocErr);
         }
 
-        let     block_base = &self.buf[self.top] as *const u8 as usize;
-        let     buf_base   = &self.buf[0]        as *const u8 as usize;
+        let buf_base   = &self.buf[0]        as *const u8 as usize;
+        let block_base = &self.buf[self.top] as *const u8 as usize;
+        let block_base = block_base - (block_base % layout.align());
 
-        if block_base & (layout.align() - 1) != 0 {
-            // TODO: Adjust instead of panicing!
-            panic!("Bad alignment that I should fix.");
-        }
         // This is the pointer that the caller will receive, if we have room.
         // We got it by indexing into self.buf, so we know it can't be null.
         let ptr = NonNull::new_unchecked(block_base as *mut u8);
@@ -115,24 +144,61 @@ unsafe impl <'a> alloc::Alloc for StackAlloc<'a> {
         }
     }
 
-    unsafe fn dealloc(&mut self, _ptr: NonNull<u8>, _layout: alloc::Layout) {
-        // TODO: Check if this allocation is the last one made.
-        //       If this layout and ptr are at the top of the stack, we can
-        //       dealloc it.
-        //       Otherwise we can't do anything, ever.
-        () // Do nothing.
+    unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: alloc::Layout) {
+        // Because we return tight bounds for calls to `usable_size()`,
+        // we can assume that this `layout` struct is exactly the size of our
+        // block.
+
+        // If our block is at the top of the stack, we can free it.
+        let block_idx = self.get_block_idx(ptr);
+        if block_idx + layout.size() == self.top {
+            self.top = block_idx;
+        }
+        // Anything else... and we can't.
+    }
+
+    unsafe fn grow_in_place(&mut self,
+                            ptr:      NonNull<u8>,
+                            layout:   alloc::Layout,
+                            new_size: usize)
+        -> result::Result<(), alloc::CannotReallocInPlace>
+    {
+        // This is illegal, as per the Api!
+        debug_assert!(layout.size() != new_size);
+        debug_assert!(layout.size() < new_size);
+        if layout.size() >= new_size {
+            return Err(alloc::CannotReallocInPlace);
+        }
+
+        let space_left = self.capacity() - self.bytes_in_use();
+        // If it turns out we can grow in place,
+        // we'll need at this much additional room.
+        let block_growth = new_size - layout.size();
+        if space_left < block_growth {
+            return Err(alloc::CannotReallocInPlace);
+        }
+
+        let block_idx = self.get_block_idx(ptr);
+        if block_idx >= self.buf.len() {
+            // This pointer is probably not even ours.
+            return Err(alloc::CannotReallocInPlace);
+        }
+
+        // This wasn't the last block allocated, so we can't grow it in place.
+        if block_idx + layout.size() != self.top {
+            return Err(alloc::CannotReallocInPlace);
+        }
+
+        // Now we know that
+        //      1) self.buf has enough room, and
+        //      2) The block in question is at the top of the stack
+        // So we can go ahead and bump self.top and call it success.
+        self.top += block_growth;
+        println!("new top: {}", self.top);
+        Ok(())
     }
 
     // ----- These may be useful to implement later. ----------------------------
-
-    unsafe fn grow_in_place(&mut self,
-                            _ptr:      NonNull<u8>,
-                            _layout:   alloc::Layout,
-                            _new_size: usize)
-        -> result::Result<(), alloc::CannotReallocInPlace>
-    {
-        Err(alloc::CannotReallocInPlace)
-    }
 
     unsafe fn shrink_in_place(&mut self,
                               _ptr:      NonNull<u8>,
@@ -244,6 +310,30 @@ mod t {
             *b = 45;
             assert_eq!(*b as u8, buf[4]);
         }
+    }
+
+    #[test]
+    fn check_in_place_realloc() {
+        let mut buf = [0u8; 3*8];
+        let mut alloc = StackAlloc::new(&mut buf);
+
+        // Unsafe because of calls to alloc
+        unsafe {
+            let layout     = alloc::Layout::new::<[u8; 8]>();
+            let p_first  = alloc.alloc(layout).expect("Couldn't alloc [0, 8]");
+            let p_second = alloc.alloc(layout).expect("Couldn't alloc [8, 16]");
+
+            let new_layout = alloc::Layout::new::<[u8; 16]>();
+            alloc.grow_in_place(p_second, layout, 16)
+                .expect("Couldn't grow in place from [8, 16] to [8, 24]");
+            alloc.dealloc(p_second, new_layout);
+
+            alloc.grow_in_place(p_first, layout, 16)
+                .expect("Couldn't grow in place from [0, 8] to [0, 16]");
+            alloc.dealloc(p_first, new_layout);
+        }
+
+        assert_eq!(alloc.bytes_in_use(), 0);
     }
 
 }
