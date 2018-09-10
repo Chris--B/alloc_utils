@@ -1,5 +1,7 @@
 use std::{
     alloc,
+    iter,
+    mem,
     ops,
     ptr::{
         self,
@@ -28,6 +30,14 @@ pub struct Vec<'v, T> {
     ptr:   NonNull<T>, // Pointer to Ts
     cap:   usize,      // How many Ts we can hold without growing.
     len:   usize,      // How many Ts we have initialized.
+}
+
+pub struct IntoIter<'v, T> {
+    buf:    NonNull<T>,
+    alloc:  NonNull<alloc::Alloc + 'v>,
+    layout: alloc::Layout,
+    start:  *const T,
+    end:    *const T,
 }
 
 impl <'v, T> Vec<'v, T> {
@@ -113,6 +123,10 @@ impl <'v, T> Vec<'v, T> {
         self
     }
 
+    // Increase the allocated backing buffer of the Vec.
+    //
+    // Each call to `grow` doubles the size of the allocation, which is
+    // initially space for a single T.
     fn grow(&mut self) -> VecResult<()> {
         // There's lots of room for error here, so let's call it all unsafe.
         unsafe {
@@ -126,7 +140,7 @@ impl <'v, T> Vec<'v, T> {
                 new_ptr = self.alloc.as_mut().alloc(layout)?.cast();
             } else {
                 // layout must refer to the *existing* allocation.
-                layout  = alloc::Layout::array::<T>(self.cap).unwrap();
+                layout  = self.alloc_layout();
                 new_cap = 2 * self.cap;
 
                 if let Ok(_) = self.alloc.as_mut().grow_in_place(self.ptr.cast(),
@@ -147,7 +161,16 @@ impl <'v, T> Vec<'v, T> {
         Ok(())
     }
 
+    // Get the Layout for the current allocation. This is suitable to pass to
+    // `alloc::Alloc` methods.
+    fn alloc_layout(&self) -> alloc::Layout {
+        // This should never fail.
+        alloc::Layout::array::<T>(self.cap).unwrap()
+    }
+
 }
+
+// ----- Vec Traits -------------------------------------------------------------
 
 impl <'v, T> Drop for Vec<'v, T> {
 
@@ -158,7 +181,7 @@ impl <'v, T> Drop for Vec<'v, T> {
             while let Some(_) = self.pop() {};
 
             unsafe {
-                let layout = alloc::Layout::array::<T>(self.cap).unwrap();
+                let layout = self.alloc_layout();
                 self.alloc.as_mut().dealloc(self.ptr.cast(), layout);
             }
         }
@@ -187,6 +210,97 @@ impl <'v, T> ops::DerefMut for Vec<'v, T> {
     }
 
 }
+
+impl <'v, T> iter::IntoIterator for Vec<'v, T> {
+    type Item = T;
+    type IntoIter = ::vec2::IntoIter<'v, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        // We're the vector now.
+        let alloc  = self.alloc;
+        let ptr    = self.ptr;
+        let len    = self.len;
+        let layout = self.alloc_layout();
+        mem::forget(self);
+
+        unsafe {
+            IntoIter {
+                buf: ptr,
+                alloc: alloc,
+                layout,
+                start: ptr.as_ptr(),
+                end:   ptr.as_ptr().offset(len as isize),
+            }
+        }
+    }
+}
+
+// ----- IntoIter Traits --------------------------------------------------------
+
+impl <'v, T> iter::Iterator for IntoIter<'v, T> {
+
+    type Item = T;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let start = self.start as usize;
+        let end   = self.end as usize;
+        let len   = (end - start) / mem::size_of::<T>();
+        (len, Some(len))
+    }
+
+    fn next(&mut self) -> Option<T> {
+        if self.start == self.end {
+            None
+        } else {
+            unsafe {
+                let item = ptr::read(self.start);
+                self.start = self.start.offset(1);
+                Some(item)
+            }
+        }
+    }
+
+}
+
+impl <'v, T> iter::DoubleEndedIterator for IntoIter<'v, T> {
+
+    fn next_back(&mut self) -> Option<T> {
+        if self.start == self.end {
+            None
+        } else {
+            unsafe {
+                self.end = self.end.offset(-1);
+                Some(ptr::read(self.end))
+            }
+        }
+    }
+
+}
+
+impl <'v, T> iter::ExactSizeIterator for IntoIter<'v, T> {
+    // The default implementation is enough.
+}
+
+impl <'v, T> iter::FusedIterator for IntoIter<'v, T> {
+    // The default implementation is enough.
+}
+
+impl <'v, T> Drop for IntoIter<'v, T> {
+
+    fn drop(&mut self) {
+        // Drop all remaining items
+        for _ in &mut *self {}
+
+        // And deallocate
+        unsafe {
+            let layout = self.layout;
+            self.alloc.as_mut().dealloc(self.buf.cast(), layout);
+        }
+    }
+}
+
+// ----- Tests ------------------------------------------------------------------
+
 
 #[cfg(test)]
 mod t {
