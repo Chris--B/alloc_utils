@@ -34,7 +34,7 @@ pub struct Vec<'v, T> {
 
 pub struct IntoIter<'v, T> {
     buf:    NonNull<T>,
-    alloc:  NonNull<alloc::Alloc + 'v>,
+    alloc:  NonNull<dyn alloc::Alloc + 'v>,
     layout: alloc::Layout,
     start:  *const T,
     end:    *const T,
