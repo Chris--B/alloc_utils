@@ -24,39 +24,44 @@ use std::{
 /// # use alloc_api_tools::linear_alloc::LinearAlloc;
 /// #
 /// // Force the allocator to start on an 8-byte aligned boundary.
-/// #[repr(align(8))] struct Struct { buf: [u8; 20] }
-/// let mut buf = Struct { buf: [0u8; 20] };
+/// #[repr(align(8))] struct Buffer { buf: [u8; 24] }
+/// let mut buf = Buffer { buf: [0u8; 24] };
 ///
 /// let mut allocator = LinearAlloc::new(&mut buf.buf);
 ///
-/// // Allocator API is predominately unsafe.
+/// // The Allocator API is predominately unsafe.
 /// unsafe {
 ///     // Allocate extremely small blocks.
-///     let _ = allocator.alloc(Layout::new::<u8>()).unwrap();
+///     let _ = allocator.alloc_one::<u8>().unwrap();
 ///     assert_eq!(allocator.bytes_in_use(), 1);
 ///
 ///     // Allocations are still aligned, and can "waste" space.
 ///     // u16 is 2-byte aligned, so we "waste" a byte.
-///     let _ = allocator.alloc(Layout::new::<u16>()).unwrap();
+///     let _ = allocator.alloc_one::<u16>().unwrap();
 ///     assert_eq!(allocator.bytes_in_use(), 4);
 ///
 ///     // Save spots in the stack.
 ///     let marker_at_4 = allocator.get_marker();
 ///
-///     let _ = allocator.alloc(Layout::new::<u32>()).unwrap();
-///     assert_eq!(allocator.bytes_in_use(), 8);
+///     // Allocating arrays.
+///     let _ = allocator.alloc_array::<u32>(2).unwrap();
+///     assert_eq!(allocator.bytes_in_use(), 12);
 ///
-///     let ptr = allocator.alloc(Layout::new::<u64>()).unwrap();
+///     let ptr = allocator.alloc_one::<u64>().unwrap();
+///     assert_eq!(allocator.bytes_in_use(), 24);
+///
+///     // Deallocating blocks from the top actually frees them.
+///     allocator.dealloc_one::<u64>(ptr);
 ///     assert_eq!(allocator.bytes_in_use(), 16);
 ///
-///     // deallocating blocks from the top actually frees them
-///     allocator.dealloc(ptr, Layout::new::<u64>());
-///     assert_eq!(allocator.bytes_in_use(), 8);
-///
 ///     // High water mark to see how bad it got.
-///     assert_eq!(allocator.high_water_mark(), 16);
+///     assert_eq!(allocator.high_water_mark(), 24);
 ///
-///     // Restore saved locations
+///     // Ooms fail gracefully.
+///     let res = allocator.alloc_array::<u64>(6);
+///     assert_eq!(res, Err(AllocErr));
+///
+///     // Restore saved locations.
 ///     allocator.reset_to(marker_at_4);
 ///     assert_eq!(allocator.bytes_in_use(), 4);
 ///
