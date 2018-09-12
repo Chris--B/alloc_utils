@@ -5,7 +5,7 @@ use std::{
     ptr::NonNull,
 };
 
-/// A stack allocator which uses a supplied-slice as backing memory.
+/// A linear allocator which uses a supplied-slice as backing memory.
 ///
 /// The user supplied slice can exist on the stack or heap, but it must outlive
 /// the allocator.
@@ -17,7 +17,7 @@ use std::{
 /// opposite order in which they were `alloc`ed, then all allocations can be
 /// reused for further memory requests.)
 #[derive(Debug)]
-pub struct StackAlloc<'a> {
+pub struct LinearAlloc<'a> {
     // The buffer backing allocations
     buf:  &'a [u8],
     // The current top of the stack as an index into buf.
@@ -30,18 +30,18 @@ pub struct StackAlloc<'a> {
 pub struct Marker(usize);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum StackAllocError {
+pub enum LinearAllocError {
     // There was an attempt to reset the stack to a marker which is not valid.
     InvalidMarker,
 }
 
-pub type StackAllocResult<T> = result::Result<T, StackAllocError>;
+pub type LinearAllocResult<T> = result::Result<T, LinearAllocError>;
 
-impl <'a> StackAlloc<'a> {
+impl <'a> LinearAlloc<'a> {
 
-    /// Create a new stack allocator with a backing buffer.
-    pub fn new(buf: &mut [u8]) -> StackAlloc {
-        StackAlloc {
+    /// Create a new linear allocator with a backing buffer.
+    pub fn new(buf: &mut [u8]) -> LinearAlloc {
+        LinearAlloc {
             buf,
             top:  0,
             high: 0,
@@ -62,14 +62,14 @@ impl <'a> StackAlloc<'a> {
     /// This is unsafe because it marks all memory from this allocator as "free",
     /// even if there are still objects using this memory.
     /// It is the responsibility of the caller to ensure that this doesn't happen.
-    pub unsafe fn reset_to(&mut self, marker: Marker) -> StackAllocResult<()> {
+    pub unsafe fn reset_to(&mut self, marker: Marker) -> LinearAllocResult<()> {
         if marker.0 < self.buf.len() &&
            marker.0 < self.top           // Don't reset "up".
         {
             self.top = marker.0;
             Ok(())
         } else {
-            Err(StackAllocError::InvalidMarker)
+            Err(LinearAllocError::InvalidMarker)
         }
     }
 
@@ -118,7 +118,7 @@ impl <'a> StackAlloc<'a> {
 
 }
 
-unsafe impl <'a> alloc::Alloc for StackAlloc<'a> {
+unsafe impl <'a> alloc::Alloc for LinearAlloc<'a> {
 
     fn usable_size(&self, layout: &alloc::Layout) -> (usize, usize) {
         // Our allocations are tight, and do not include any excess.
@@ -270,7 +270,7 @@ mod t {
         // alloc &muts buf, and we need to read buf to check the tests.
         // Some day, this can just use a mem::forget() call instead of scoping.
         {
-            let mut alloc = StackAlloc::new(&mut buf);
+            let mut alloc = LinearAlloc::new(&mut buf);
 
             let layout = alloc::Layout::new::<u32>();
             // This *should* be knowable at compile time, but Rust isn't there yet.
@@ -333,7 +333,7 @@ mod t {
     #[test]
     fn check_in_place_realloc() {
         let mut buf = [0u8; 3*8];
-        let mut alloc = StackAlloc::new(&mut buf);
+        let mut alloc = LinearAlloc::new(&mut buf);
 
         // Unsafe because of calls to alloc
         unsafe {

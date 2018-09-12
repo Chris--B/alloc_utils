@@ -22,14 +22,7 @@ pub struct RawVec<'v, T> {
 }
 
 impl <'v, T> RawVec<'v, T> {
-    pub fn ptr(&self) -> *mut T {
-        self.ptr.as_ptr()
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.cap
-    }
-
+    /// Create a new buffer. Does not allocate.
     pub fn new(alloc: &mut (dyn alloc::Alloc + 'v)) -> Self {
         assert!(mem::size_of::<T>() != 0, "Zero Sized Types are not supported");
         RawVec {
@@ -39,6 +32,22 @@ impl <'v, T> RawVec<'v, T> {
         }
     }
 
+    /// Get the type erased Allocator that the Vec is using.
+    pub fn alloc(&mut self) -> &mut dyn alloc::Alloc {
+        unsafe { self.alloc.as_mut() }
+    }
+
+    /// Get the pointer to the buffer.
+    pub fn ptr(&self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+
+    /// Get the number of Ts that the buffer has space for.
+    pub fn capacity(&self) -> usize {
+        self.cap
+    }
+
+    /// Create and allocate a new buffer.
     pub fn with_capacity(alloc: &mut (dyn alloc::Alloc + 'v),
                          capacity: usize)
         -> VecResult<Self>
@@ -58,11 +67,6 @@ impl <'v, T> RawVec<'v, T> {
     pub fn alloc_layout(&self) -> alloc::Layout {
         // I'm not entirely sure how this could fail.
         alloc::Layout::array::<T>(self.cap).unwrap()
-    }
-
-    /// Get the type erased Allocator that the Vec is using.
-    pub unsafe fn alloc(&mut self) -> &mut dyn alloc::Alloc {
-        self.alloc.as_mut()
     }
 
     /// Each call to `grow` *doubles* the size of the allocation, which is

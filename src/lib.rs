@@ -25,6 +25,6 @@ impl std::convert::From<std::alloc::AllocErr> for Error {
     }
 }
 
+pub mod linear_alloc;
 pub mod raw_vec;
-pub mod stack_alloc;
 pub mod vec2;

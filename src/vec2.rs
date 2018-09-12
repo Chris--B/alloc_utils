@@ -238,7 +238,7 @@ impl <'v, T> Drop for IntoIter<'v, T> {
 #[cfg(test)]
 mod t {
     use super::*;
-    use stack_alloc::StackAlloc;
+    use linear_alloc::LinearAlloc;
 
     use std::{
         cell,
@@ -262,7 +262,7 @@ mod t {
     #[test]
     fn check_one_push_works() {
         let mut buf = [0u8; 43]; // Room for 10 u32s, and extra space.
-        let mut alloc = StackAlloc::new(&mut buf);
+        let mut alloc = LinearAlloc::new(&mut buf);
         let mut v = Vec::<u32>::new(&mut alloc);
         v.push(1).expect("v.push(1) failed.");
 
@@ -272,7 +272,7 @@ mod t {
     #[test]
     fn check_many_pushes_all_work() {
         let mut buf = [0u8; 43]; // Room for 10 u32s, and extra space.
-        let mut alloc = StackAlloc::new(&mut buf);
+        let mut alloc = LinearAlloc::new(&mut buf);
         let mut v = Vec::<u32>::new(&mut alloc);
         v.push(1).expect("v.push(1) failed.");
         v.push(2).expect("v.push(2) failed.");
@@ -286,7 +286,7 @@ mod t {
     #[test]
     fn check_two_vectors_one_alloc() {
         let mut buf = [0u8; 56];
-        let mut alloc = StackAlloc::new(&mut buf);
+        let mut alloc = LinearAlloc::new(&mut buf);
         let mut v = Vec::<u32>::new(&mut alloc);
         let mut w = Vec::<u32>::new(&mut alloc);
 
@@ -323,7 +323,7 @@ mod t {
     #[test]
     fn check_drop_called() {
         let mut buf = [0u8; 128];
-        let mut alloc = StackAlloc::new(&mut buf);
+        let mut alloc = LinearAlloc::new(&mut buf);
 
         let data = &cell::RefCell::new(0);
 
@@ -346,7 +346,7 @@ mod t {
     #[test]
     fn check_insert_and_remove() {
         let mut buf = [0u8; 128];
-        let mut alloc = StackAlloc::new(&mut buf);
+        let mut alloc = LinearAlloc::new(&mut buf);
         let mut v = Vec::<u64>::new(&mut alloc);
 
         v.push(2*1).expect("push(2*1) failed.");
