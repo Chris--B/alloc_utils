@@ -16,6 +16,55 @@ use std::{
 /// (Note: If all allocations are `dealloc`ed in the exact,
 /// opposite order in which they were `alloc`ed, then all allocations can be
 /// reused for further memory requests.)
+///
+/// ```rust
+/// # #![feature(allocator_api)]
+/// # use std::alloc::*;
+/// # use std::ptr;
+/// # use alloc_api_tools::linear_alloc::LinearAlloc;
+/// #
+/// // Force the allocator to start on an 8-byte aligned boundary.
+/// #[repr(align(8))] struct Struct { buf: [u8; 20] }
+/// let mut buf = Struct { buf: [0u8; 20] };
+///
+/// let mut allocator = LinearAlloc::new(&mut buf.buf);
+///
+/// // Allocator API is predominately unsafe.
+/// unsafe {
+///     // Allocate extremely small blocks.
+///     let _ = allocator.alloc(Layout::new::<u8>()).unwrap();
+///     assert_eq!(allocator.bytes_in_use(), 1);
+///
+///     // Allocations are still aligned, and can "waste" space.
+///     // u16 is 2-byte aligned, so we "waste" a byte.
+///     let _ = allocator.alloc(Layout::new::<u16>()).unwrap();
+///     assert_eq!(allocator.bytes_in_use(), 4);
+///
+///     // Save spots in the stack.
+///     let marker_at_4 = allocator.get_marker();
+///
+///     let _ = allocator.alloc(Layout::new::<u32>()).unwrap();
+///     assert_eq!(allocator.bytes_in_use(), 8);
+///
+///     let ptr = allocator.alloc(Layout::new::<u64>()).unwrap();
+///     assert_eq!(allocator.bytes_in_use(), 16);
+///
+///     // deallocating blocks from the top actually frees them
+///     allocator.dealloc(ptr, Layout::new::<u64>());
+///     assert_eq!(allocator.bytes_in_use(), 8);
+///
+///     // High water mark to see how bad it got.
+///     assert_eq!(allocator.high_water_mark(), 16);
+///
+///     // Restore saved locations
+///     allocator.reset_to(marker_at_4);
+///     assert_eq!(allocator.bytes_in_use(), 4);
+///
+///     // Hard reset of all allocations.
+///     allocator.reset();
+///     assert_eq!(allocator.bytes_in_use(), 0);
+/// }
+/// ```
 #[derive(Debug)]
 pub struct LinearAlloc<'a> {
     // The buffer backing allocations
@@ -35,7 +84,7 @@ pub enum LinearAllocError {
     InvalidMarker,
 }
 
-pub type LinearAllocResult<T> = result::Result<T, LinearAllocError>;
+type LinearAllocResult<T> = result::Result<T, LinearAllocError>;
 
 impl <'a> LinearAlloc<'a> {
 
@@ -138,7 +187,7 @@ unsafe impl <'a> alloc::Alloc for LinearAlloc<'a> {
 
         let buf_base   = &self.buf[0]        as *const u8 as usize;
         let block_base = &self.buf[self.top] as *const u8 as usize;
-        let block_base = block_base - (block_base % layout.align());
+        let block_base = block_base + (block_base % layout.align());
 
         // This is the pointer that the caller will receive, if we have room.
         // We got it by indexing into self.buf, so we know it can't be null.
