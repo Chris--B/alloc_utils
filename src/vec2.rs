@@ -9,9 +9,10 @@ use std::{
 };
 
 use raw_vec::RawVec;
+use Error;
 
 // TODO: Failure crate
-type VecResult<T> = result::Result<T, alloc::AllocErr>;
+type VecResult<T> = result::Result<T, Error>;
 
 // ----- Vec Impl ---------------------------------------------------------------
 
