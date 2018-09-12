@@ -3,62 +3,58 @@ use std::{
     iter,
     mem,
     ops,
-    ptr::{
-        self,
-        NonNull,
-    },
+    ptr,
     result,
     slice,
 };
 
+use raw_vec::RawVec;
+
 // TODO: Failure crate
 type VecResult<T> = result::Result<T, alloc::AllocErr>;
 
-/// A grow-able and shrink-able dynamically sized array.
+// ----- Vec Impl ---------------------------------------------------------------
+
+
+/// A continuous growable array type with a customizable memory allocator.
 ///
 /// It differs from `std::vec::Vec` by storing its own allocator instead of
 /// using the global or system allocators.
 pub struct Vec<'v, T> {
-    // We store a pointer to the allocator instead of a reference to get around
-    // mutability restrictions.
-    // We cannot have the Vec exercise unilateral control over the allocator,
-    // as we expect
-    //  (1) other collections to use the same allocator, and
-    //  (2) callers to interact with the allocator while the Vec does too.
-    // We do still have lifetime guarantees, however.
-    alloc: NonNull<alloc::Alloc + 'v>,
-    ptr:   NonNull<T>, // Pointer to Ts
-    cap:   usize,      // How many Ts we can hold without growing.
-    len:   usize,      // How many Ts we have initialized.
-}
-
-pub struct IntoIter<'v, T> {
-    buf:    NonNull<T>,
-    alloc:  NonNull<dyn alloc::Alloc + 'v>,
-    layout: alloc::Layout,
-    start:  *const T,
-    end:    *const T,
+    buf:   RawVec<'v, T>, // Resizeable memory buffer.
+    len:   usize,         // Count of Ts stored.
 }
 
 impl <'v, T> Vec<'v, T> {
+    fn ptr(&self) -> *mut T {
+        self.buf.ptr()
+    }
+
+    /// The number of items that the Vec can hold before resizing.
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
+    }
+
+    /// The number of items currently in the Vec.
+    pub fn len(&self) -> usize {
+        self.len
+    }
 
     /// Construct a new Vec
     pub fn new(alloc: &mut (dyn alloc::Alloc + 'v)) -> Self {
         Vec {
-            alloc: NonNull::new(alloc).unwrap(),
-            ptr:   NonNull::dangling(),
-            cap:   0,
-            len:   0,
+            buf: RawVec::new(alloc),
+            len: 0,
         }
     }
 
     /// Move `elem` into the Vec, returning any allocation errors.
     pub fn push(&mut self, elem: T) -> VecResult<()> {
-        if self.len == self.cap {
-            self.grow()?;
+        if self.len == self.capacity() {
+            self.buf.grow()?;
         }
         unsafe {
-            ptr::write(self.ptr.as_ptr().offset(self.len as isize), elem);
+            ptr::write(self.ptr().offset(self.len as isize), elem);
         }
         self.len += 1;
         Ok(())
@@ -73,7 +69,7 @@ impl <'v, T> Vec<'v, T> {
         } else {
             Some(unsafe {
                 self.len -= 1;
-                ptr::read(self.ptr.as_ptr().offset(self.len as isize))
+                ptr::read(self.ptr().offset(self.len as isize))
             })
         }
     }
@@ -82,17 +78,17 @@ impl <'v, T> Vec<'v, T> {
     /// and returning any allocation errors.
     pub fn insert(&mut self, index: usize, elem: T) -> VecResult<()> {
         assert!(index <= self.len);
-        if self.cap == self.len {
-            self.grow()?;
+        if self.len == self.capacity() {
+            self.buf.grow()?;
         }
 
         unsafe {
             if index < self.len {
-                ptr::copy(self.ptr.as_ptr().offset(index as isize),
-                          self.ptr.as_ptr().offset(index as isize + 1),
+                ptr::copy(self.ptr().offset(index as isize),
+                          self.ptr().offset(index as isize + 1),
                           self.len - index);
             }
-            ptr::write(self.ptr.as_ptr().offset(index as isize), elem);
+            ptr::write(self.ptr().offset(index as isize), elem);
             self.len += 1;
         }
 
@@ -105,9 +101,9 @@ impl <'v, T> Vec<'v, T> {
         let corpse;
         unsafe {
             self.len -= 1;
-            corpse = ptr::read(self.ptr.as_ptr().offset(index as isize));
-            ptr::copy(self.ptr.as_ptr().offset(index as isize + 1),
-                      self.ptr.as_ptr().offset(index as isize),
+            corpse = ptr::read(self.ptr().offset(index as isize));
+            ptr::copy(self.ptr().offset(index as isize + 1),
+                      self.ptr().offset(index as isize),
                       self.len - index);
         }
         corpse
@@ -122,128 +118,75 @@ impl <'v, T> Vec<'v, T> {
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         self
     }
-
-    // Increase the allocated backing buffer of the Vec.
-    //
-    // Each call to `grow` doubles the size of the allocation, which is
-    // initially space for a single T.
-    fn grow(&mut self) -> VecResult<()> {
-        // There's lots of room for error here, so let's call it all unsafe.
-        unsafe {
-            let new_cap: usize;
-            let new_ptr: NonNull<T>;
-            let layout:  alloc::Layout;
-
-            if self.cap == 0 {
-                new_cap = 1;
-                layout  = alloc::Layout::array::<T>(new_cap).unwrap();
-                new_ptr = self.alloc.as_mut().alloc(layout)?.cast();
-            } else {
-                // layout must refer to the *existing* allocation.
-                layout  = self.alloc_layout();
-                new_cap = 2 * self.cap;
-
-                if let Ok(_) = self.alloc.as_mut().grow_in_place(self.ptr.cast(),
-                                                                 layout,
-                                                                 2 * layout.size())
-                {
-                    new_ptr = self.ptr;
-                } else {
-                    new_ptr = self.alloc.as_mut().realloc(self.ptr.cast(),
-                                                          layout,
-                                                          2 * layout.size())?.cast();
-                }
-            }
-
-            self.cap = new_cap;
-            self.ptr = new_ptr;
-        }
-        Ok(())
-    }
-
-    // Get the Layout for the current allocation. This is suitable to pass to
-    // `alloc::Alloc` methods.
-    fn alloc_layout(&self) -> alloc::Layout {
-        // This should never fail.
-        alloc::Layout::array::<T>(self.cap).unwrap()
-    }
-
 }
 
 // ----- Vec Traits -------------------------------------------------------------
 
 impl <'v, T> Drop for Vec<'v, T> {
-
     fn drop(&mut self) {
-        if self.cap != 0 {
-            // We must call each destructor. If T doesn't impl Drop, this loop
-            // is optimized out.
+        if self.capacity() != 0 {
+            // We must call each destructor.
+            // If T doesn't impl Drop, this loop is optimized out.
             while let Some(_) = self.pop() {};
-
-            unsafe {
-                let layout = self.alloc_layout();
-                self.alloc.as_mut().dealloc(self.ptr.cast(), layout);
-            }
         }
     }
-
 }
 
 impl <'v, T> ops::Deref for Vec<'v, T> {
-
     type Target = [T];
 
     fn deref(&self) -> &[T] {
         unsafe {
-            slice::from_raw_parts(self.ptr.as_ptr(), self.len)
+            slice::from_raw_parts(self.ptr(), self.len)
         }
     }
-
 }
 
 impl <'v, T> ops::DerefMut for Vec<'v, T> {
-
     fn deref_mut(&mut self) -> &mut [T] {
         unsafe {
-            slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len)
+            slice::from_raw_parts_mut(self.ptr(), self.len)
         }
     }
-
 }
 
 impl <'v, T> iter::IntoIterator for Vec<'v, T> {
     type Item = T;
-    type IntoIter = ::vec2::IntoIter<'v, T>;
+    type IntoIter = IntoIter<'v, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        // We're the vector now.
-        let alloc  = self.alloc;
-        let ptr    = self.ptr;
-        let len    = self.len;
-        let layout = self.alloc_layout();
+        // We need to use ptr::read to move the buf out, since it's not Copy and
+        // Vec implements Drop (and so we can't destructure it)
+        let buf = unsafe { ptr::read(&self.buf) };
+        let ptr = self.ptr();
+        let len = self.len();
         mem::forget(self);
 
         unsafe {
             IntoIter {
-                buf: ptr,
-                alloc: alloc,
-                layout,
-                start: ptr.as_ptr(),
-                end:   ptr.as_ptr().offset(len as isize),
+                _buf:  buf,
+                start: ptr,
+                end:   ptr.offset(len as isize),
             }
         }
     }
 }
 
-// ----- IntoIter Traits --------------------------------------------------------
+// ----- IntoIter  --------------------------------------------------------------
+
+pub struct IntoIter<'v, T> {
+    _buf:   RawVec<'v, T>,  // The memory backing the items.
+                            // This is held onto to drop, but is unused.
+    start:  *const T,       // The next item in the iterator
+    end:    *const T,       // The next_back item in the iterator
+}
 
 impl <'v, T> iter::Iterator for IntoIter<'v, T> {
-
     type Item = T;
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let start = self.start as usize;
-        let end   = self.end as usize;
+        let end   = self.end   as usize;
         let len   = (end - start) / mem::size_of::<T>();
         (len, Some(len))
     }
@@ -259,11 +202,9 @@ impl <'v, T> iter::Iterator for IntoIter<'v, T> {
             }
         }
     }
-
 }
 
 impl <'v, T> iter::DoubleEndedIterator for IntoIter<'v, T> {
-
     fn next_back(&mut self) -> Option<T> {
         if self.start == self.end {
             None
@@ -274,7 +215,6 @@ impl <'v, T> iter::DoubleEndedIterator for IntoIter<'v, T> {
             }
         }
     }
-
 }
 
 impl <'v, T> iter::ExactSizeIterator for IntoIter<'v, T> {
@@ -286,25 +226,16 @@ impl <'v, T> iter::FusedIterator for IntoIter<'v, T> {
 }
 
 impl <'v, T> Drop for IntoIter<'v, T> {
-
     fn drop(&mut self) {
         // Drop all remaining items
         for _ in &mut *self {}
-
-        // And deallocate
-        unsafe {
-            let layout = self.layout;
-            self.alloc.as_mut().dealloc(self.buf.cast(), layout);
-        }
     }
 }
 
 // ----- Tests ------------------------------------------------------------------
 
-
 #[cfg(test)]
 mod t {
-
     use super::*;
     use stack_alloc::StackAlloc;
 
@@ -433,5 +364,4 @@ mod t {
         assert_eq!(&[2, 4, 6, 1001, 10, 12, 14], v.as_slice());
         assert_eq!(corpse, 8);
     }
-
 }
