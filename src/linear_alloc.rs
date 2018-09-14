@@ -236,28 +236,43 @@ unsafe impl <'a> alloc::Alloc for LinearAlloc<'a> {
                             new_size: usize)
         -> result::Result<(), alloc::CannotReallocInPlace>
     {
-        // This is illegal, as per the Api!
-        debug_assert!(layout.size() != new_size);
-        debug_assert!(layout.size() < new_size);
-        if layout.size() >= new_size {
-            return Err(alloc::CannotReallocInPlace);
-        }
+        let block_idx  = self.get_block_idx(ptr);
+        let block_size;
+
+        // We assert on these to catch errors quickly, but we do not guard
+        // against them because they are *caller* errors.
+
+        // The spec for `Alloc::grow_in_place` guarantees:
+        //    1) ptr must be currently allocated via this allocator,
+        assert!(block_idx < self.buf.len(),
+                "Pointer is not from this allocator.");
+        assert!(block_idx < self.top,
+                "Pointer has already been freed, or is invalid.");
+        // This is guaranteed not to underflow now.
+        block_size = self.top - block_idx;
+        //    2) layout must fit the ptr;
+        //       note the new_size argument need not fit it
+        assert_eq!(ptr.as_ptr() as usize % layout.align(), 0,
+                   "Pointer does not fit layout.");
+        assert!(self.usable_size(&layout).0 <= block_size,
+                "The blocks size is too small?");
+        //    3) new_size must not be greater than layout.size()
+        //       (and must be greater than zero),
+        assert!(new_size >= layout.size(),
+                "Attempting to \"grow\" an allocation smaller.");
+        assert_ne!(new_size, 0,
+                "Attempting to \"grow\" an allocation to zero size.");
 
         let space_left = self.capacity() - self.bytes_in_use();
-        // If it turns out we can grow in place,
-        // we'll need at this much additional room.
+        // We need at this much additional room in order to grow in place.
         let block_growth = new_size - layout.size();
         if space_left < block_growth {
             return Err(alloc::CannotReallocInPlace);
         }
 
-        let block_idx = self.get_block_idx(ptr);
-        if block_idx >= self.buf.len() {
-            // This pointer is probably not even ours.
-            return Err(alloc::CannotReallocInPlace);
-        }
-
         // This wasn't the last block allocated, so we can't grow it in place.
+        // Note: This test does not account for padding due to the alignment of
+        //       a previous allocation that has since been freed.
         if block_idx + layout.size() != self.top {
             return Err(alloc::CannotReallocInPlace);
         }
