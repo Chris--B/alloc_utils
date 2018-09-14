@@ -121,6 +121,19 @@ impl <'v, T> Vec<'v, T> {
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         self
     }
+
+    /// Creates a draining iterator that removes elements from the Vec, and then
+    /// yields them.
+    pub fn drain(&mut self) -> Drain<T> {
+        unsafe {
+            let iter = RawValIter::new(&self);
+            self.len = 0;
+            Drain {
+                _vec: marker::PhantomData,
+                iter: iter,
+            }
+        }
+    }
 }
 
 // ----- Vec Traits -------------------------------------------------------------
@@ -270,7 +283,40 @@ impl <'v, T> iter::FusedIterator for IntoIter<'v, T> {}
 
 // ----- Drain & Traits ---------------------------------------------------------
 
+// See `Vec::drain()`
+pub struct Drain<'a, 'v: 'a, T: 'v> {
+    _vec: marker::PhantomData<&'a mut Vec<'v, T>>,
+    iter: RawValIter<T>,
+}
 
+impl <'a, 'v, T> iter::Iterator for Drain<'a, 'v, T> {
+    type Item = T;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+
+    fn next(&mut self) -> Option<T> {
+        self.iter.next()
+    }
+}
+
+impl <'a, 'v, T> iter::DoubleEndedIterator for Drain<'a, 'v, T> {
+    fn next_back(&mut self) -> Option<T> {
+        self.iter.next_back()
+    }
+}
+
+impl <'a, 'v, T> iter::ExactSizeIterator for Drain<'a, 'v, T> {}
+
+impl <'a, 'v, T> iter::FusedIterator for Drain<'a, 'v, T> {}
+
+impl <'a, 'v, T> Drop for Drain<'a, 'v, T> {
+    fn drop(&mut self) {
+        // Drop all remaining items
+        for _ in &mut *self {}
+    }
+}
 
 // ----- Tests ------------------------------------------------------------------
 
