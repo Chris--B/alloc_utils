@@ -17,12 +17,11 @@ type VecResult<T> = result::Result<T, Error>;
 
 // ----- Vec Impl ---------------------------------------------------------------
 
-
 /// A continuous growable array type with a customizable memory allocator.
 ///
 /// It differs from `std::vec::Vec` by storing its own allocator instead of
 /// using the global or system allocators.
-pub struct Vec<'v, T> {
+pub struct Vec<'v, T: 'v> {
     buf:   RawVec<'v, T>, // Resizeable memory buffer.
     len:   usize,         // Count of Ts stored.
 }
@@ -32,6 +31,14 @@ impl <'v, T> Vec<'v, T> {
     pub fn new(alloc: &mut (dyn alloc::Alloc + 'v)) -> Self {
         Vec {
             buf: RawVec::new(alloc),
+            len: 0,
+        }
+    }
+
+    /// Construct a new Vec using the system allocator
+    pub fn with_system_alloc() -> Self {
+        Vec {
+            buf: RawVec::with_system_alloc(),
             len: 0,
         }
     }
@@ -247,7 +254,7 @@ impl <T> iter::FusedIterator for RawValIter<T> {}
 // ----- IntoIter & Traits ------------------------------------------------------
 
 // See `Vec::into_iter()`
-pub struct IntoIter<'v, T> {
+pub struct IntoIter<'v, T: 'v> {
     _buf: RawVec<'v, T>, // This is unused; we just need it to live.
     iter: RawValIter<T>,
 }

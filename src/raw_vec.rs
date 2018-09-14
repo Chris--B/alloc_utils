@@ -8,7 +8,7 @@ use std::{
 use Error;
 type VecResult<T> = result::Result<T, Error>;
 
-pub struct RawVec<'v, T> {
+pub struct RawVec<'v, T: 'v> {
     // We store a pointer to the allocator instead of a reference to get around
     // mutability restrictions.
     // We cannot have the Vec exercise unilateral control over the allocator,
@@ -31,6 +31,18 @@ impl <'v, T> RawVec<'v, T> {
             cap:   0,
         }
     }
+
+    /// Create a new buffer backed by the system allocator. Does not allocate.
+    pub fn with_system_alloc() -> Self {
+        let alloc = &mut alloc::System;
+        assert!(mem::size_of::<T>() != 0, "Zero Sized Types are not supported");
+        RawVec {
+            alloc: NonNull::new(alloc).unwrap(),
+            ptr:   NonNull::dangling(),
+            cap:   0,
+        }
+    }
+
 
     /// Get the type erased Allocator that the Vec is using.
     pub fn alloc(&mut self) -> &mut dyn alloc::Alloc {
