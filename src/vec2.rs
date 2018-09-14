@@ -1,6 +1,7 @@
 use std::{
     alloc,
     iter,
+    marker,
     mem,
     ops,
     ptr,
@@ -27,7 +28,16 @@ pub struct Vec<'v, T> {
 }
 
 impl <'v, T> Vec<'v, T> {
-    fn ptr(&self) -> *mut T {
+    /// Construct a new Vec
+    pub fn new(alloc: &mut (dyn alloc::Alloc + 'v)) -> Self {
+        Vec {
+            buf: RawVec::new(alloc),
+            len: 0,
+        }
+    }
+
+    /// Returns a pointer to the array of  elements.
+    pub fn ptr(&self) -> *mut T {
         self.buf.ptr()
     }
 
@@ -39,14 +49,6 @@ impl <'v, T> Vec<'v, T> {
     /// The number of items currently in the Vec.
     pub fn len(&self) -> usize {
         self.len
-    }
-
-    /// Construct a new Vec
-    pub fn new(alloc: &mut (dyn alloc::Alloc + 'v)) -> Self {
-        Vec {
-            buf: RawVec::new(alloc),
-            len: 0,
-        }
     }
 
     /// Move `elem` into the Vec, returning any allocation errors.
@@ -156,33 +158,40 @@ impl <'v, T> iter::IntoIterator for Vec<'v, T> {
     type IntoIter = IntoIter<'v, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        // We need to use ptr::read to move the buf out, since it's not Copy and
-        // Vec implements Drop (and so we can't destructure it)
-        let buf = unsafe { ptr::read(&self.buf) };
-        let ptr = self.ptr();
-        let len = self.len();
-        mem::forget(self);
-
         unsafe {
+            // We need to use ptr::read to move the buf out, since it's not Copy
+            // and Vec implements Drop (and so we can't destructure it)
+            let buf  = ptr::read(&self.buf);
+            let iter = RawValIter::new(&self);
+            mem::forget(self);
+
             IntoIter {
-                _buf:  buf,
-                start: ptr,
-                end:   ptr.offset(len as isize),
+                _buf: buf,
+                iter: iter
             }
         }
     }
 }
 
-// ----- IntoIter  --------------------------------------------------------------
+// ----- RawValIter & Traits ----------------------------------------------------
 
-pub struct IntoIter<'v, T> {
-    _buf:   RawVec<'v, T>,  // The memory backing the items.
-                            // This is held onto to drop, but is unused.
-    start:  *const T,       // The next item in the iterator
-    end:    *const T,       // The next_back item in the iterator
+// Raw iterator base
+pub struct RawValIter<T> {
+    start:  *const T, // The next item in the iterator
+    end:    *const T, // The next_back item in the iterator
 }
 
-impl <'v, T> iter::Iterator for IntoIter<'v, T> {
+impl <T> RawValIter<T> {
+    // This is unsafe because it has no associated lifetimes.
+    unsafe fn new(slice: &[T]) -> Self {
+        RawValIter {
+            start: slice.as_ptr(),
+            end:   slice.as_ptr().offset(slice.len() as isize),
+        }
+    }
+}
+
+impl <T> iter::Iterator for RawValIter<T> {
     type Item = T;
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -205,7 +214,7 @@ impl <'v, T> iter::Iterator for IntoIter<'v, T> {
     }
 }
 
-impl <'v, T> iter::DoubleEndedIterator for IntoIter<'v, T> {
+impl <T> iter::DoubleEndedIterator for RawValIter<T> {
     fn next_back(&mut self) -> Option<T> {
         if self.start == self.end {
             None
@@ -218,12 +227,16 @@ impl <'v, T> iter::DoubleEndedIterator for IntoIter<'v, T> {
     }
 }
 
-impl <'v, T> iter::ExactSizeIterator for IntoIter<'v, T> {
-    // The default implementation is enough.
-}
+impl <T> iter::ExactSizeIterator for RawValIter<T> {}
 
-impl <'v, T> iter::FusedIterator for IntoIter<'v, T> {
-    // The default implementation is enough.
+impl <T> iter::FusedIterator for RawValIter<T> {}
+
+// ----- IntoIter & Traits ------------------------------------------------------
+
+// See `Vec::into_iter()`
+pub struct IntoIter<'v, T> {
+    _buf: RawVec<'v, T>, // This is unused; we just need it to live.
+    iter: RawValIter<T>,
 }
 
 impl <'v, T> Drop for IntoIter<'v, T> {
@@ -232,6 +245,32 @@ impl <'v, T> Drop for IntoIter<'v, T> {
         for _ in &mut *self {}
     }
 }
+
+impl <'v, T> iter::Iterator for IntoIter<'v, T> {
+    type Item = T;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+
+    fn next(&mut self) -> Option<T> {
+        self.iter.next()
+    }
+}
+
+impl <'v, T> iter::DoubleEndedIterator for IntoIter<'v, T> {
+    fn next_back(&mut self) -> Option<T> {
+        self.iter.next_back()
+    }
+}
+
+impl <'v, T> iter::ExactSizeIterator for IntoIter<'v, T> {}
+
+impl <'v, T> iter::FusedIterator for IntoIter<'v, T> {}
+
+// ----- Drain & Traits ---------------------------------------------------------
+
+
 
 // ----- Tests ------------------------------------------------------------------
 
