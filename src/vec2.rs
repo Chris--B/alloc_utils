@@ -21,6 +21,21 @@ type VecResult<T> = result::Result<T, Error>;
 ///
 /// It differs from `std::vec::Vec` by storing its own allocator instead of
 /// using the global or system allocators.
+/// # Examples
+/// ```rust
+/// # use alloc_api_tools::vec2::Vec;
+/// #
+/// let mut v = Vec::with_system_alloc();
+/// v.extend_from_slice(&[1, 2, 3, 4, 5]);
+/// assert_eq!(v.as_slice(), &[1, 2, 3, 4, 5]);
+///
+/// let mut drain = v.drain();
+/// assert_eq!(drain.next(), Some(1));
+/// assert_eq!(drain.next(), Some(2));
+/// assert_eq!(drain.next(), Some(3));
+/// assert_eq!(drain.next(), Some(4));
+/// assert_eq!(drain.next(), Some(5));
+/// ```
 pub struct Vec<'v, T: 'v> {
     buf:   RawVec<'v, T>, // Resizeable memory buffer.
     len:   usize,         // Count of Ts stored.
@@ -153,6 +168,7 @@ impl <'v, T> Vec<'v, T>
     /// # use alloc_api_tools::vec2::Vec;
     /// #
     /// let mut v = Vec::<u32>::with_system_alloc();
+    ///
     /// v.extend_from_slice(&[1, 2, 3, 4]).unwrap();
     /// assert_eq!(v.as_slice(), &[1, 2, 3, 4]);
     /// ```
