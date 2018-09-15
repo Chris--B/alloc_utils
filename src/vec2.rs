@@ -143,6 +143,29 @@ impl <'v, T> Vec<'v, T> {
     }
 }
 
+impl <'v, T> Vec<'v, T>
+    where T: Clone
+{
+    /// Append items to the vector until `push` fails, or `iter` is exhausted.
+    ///
+    /// # Examples
+    /// ```rust
+    /// # use alloc_api_tools::vec2::Vec;
+    /// #
+    /// let mut v = Vec::<u32>::with_system_alloc();
+    /// v.extend_from_slice(&[1, 2, 3, 4]).unwrap();
+    /// assert_eq!(v.as_slice(), &[1, 2, 3, 4]);
+    /// ```
+    pub fn extend_from_slice(&mut self, slice: &[T]) -> VecResult<()>
+    {
+        for elem in slice {
+            self.push(elem.clone())?;
+        }
+        Ok(())
+    }
+
+}
+
 // ----- Vec Traits -------------------------------------------------------------
 
 impl <'v, T> Drop for Vec<'v, T> {
