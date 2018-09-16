@@ -21,7 +21,7 @@ use std::{
 /// # #![feature(allocator_api)]
 /// # use std::alloc::*;
 /// # use std::ptr;
-/// # use alloc_api_tools::linear_alloc::LinearAlloc;
+/// # use alloc_utils::linear_alloc::LinearAlloc;
 /// #
 /// // Force the allocator to start on an 8-byte aligned boundary.
 /// #[repr(align(8))] struct Buffer { buf: [u8; 24] }

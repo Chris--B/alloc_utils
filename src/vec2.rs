@@ -23,7 +23,7 @@ type VecResult<T> = result::Result<T, Error>;
 /// using the global or system allocators.
 /// # Examples
 /// ```rust
-/// # use alloc_api_tools::vec2::Vec;
+/// # use alloc_utils::vec2::Vec;
 /// #
 /// let mut v = Vec::with_system_alloc();
 /// v.extend_from_slice(&[1, 2, 3, 4, 5]);
@@ -74,6 +74,36 @@ impl <'v, T> Vec<'v, T> {
     }
 
     /// Move `elem` into the Vec, returning any allocation errors.
+    ///
+    /// # Examples
+    /// ```rust
+    /// # use alloc_utils::{vec2::Vec, Error};
+    /// let mut v = Vec::with_system_alloc();
+    ///
+    /// match v.push(2) {
+    ///     // Inserstion worked: Either no allocation happened, or it worked.
+    ///     Ok(()) => {},
+    ///     // If (re)allocation fails...
+    ///     Err(err) => match err {
+    ///         // Operations with `alloc::Alloc` and `alloc::Layout`
+    ///         // can generate a `alloc::LayoutErr` error.
+    ///         Error::LayoutErr(layout_err) => {
+    ///             println!("layout error: {:?}", layout_err);
+    ///         },
+    ///         // Allocation errors propgate from `alloc::Alloc` as
+    ///         // `alloc::AllocErr`.
+    ///         Error::AllocErr(alloc_err) => {
+    ///             println!("alloc error: {:?}", alloc_err);
+    ///         },
+    ///         // If layout or size calculations overflow, the resize fails.
+    ///         Error::SizeOverflowErr => {
+    ///             println!("Size overflowed trying to allocate");
+    ///         },
+    ///     }
+    /// }
+    ///
+    /// assert_eq!(v.as_slice(), &[2]);
+    /// ```
     pub fn push(&mut self, elem: T) -> VecResult<()> {
         if self.len == self.capacity() {
             self.buf.grow()?;
@@ -165,7 +195,7 @@ impl <'v, T> Vec<'v, T>
     ///
     /// # Examples
     /// ```rust
-    /// # use alloc_api_tools::vec2::Vec;
+    /// # use alloc_utils::vec2::Vec;
     /// #
     /// let mut v = Vec::<u32>::with_system_alloc();
     ///
