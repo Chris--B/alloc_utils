@@ -183,32 +183,46 @@ unsafe impl <'a> alloc::Alloc for LinearAlloc<'a> {
         (layout.size(), layout.size())
     }
 
+    // This function is carefully written! Be careful when making changes.
+    // It has no direct panic calls in release builds.
     unsafe fn alloc(&mut self, layout: alloc::Layout)
         -> result::Result<NonNull<u8>, alloc::AllocErr>
     {
-        if self.top == self.buf.len() {
+        // Layout invariants
+        debug_assert!(layout.align() != 0);
+        debug_assert!(layout.align().is_power_of_two());
+
+        if self.top >= self.buf.len() {
             return Err(alloc::AllocErr);
         }
 
-        let buf_base   = &self.buf[0]        as *const u8 as usize;
-        let block_base = &self.buf[self.top] as *const u8 as usize;
-        let block_base = block_base + (block_base % layout.align());
+        // block_base is the usize pointer where our new block starts.
+        // It needs to be computed from buf and top, but also adjusted
+        // (as a pointer) for correct alignment.
+        let mut block_base: usize;
+        block_base    = self.buf.as_ptr() as usize + self.top;
+        // Alignment is tricky and this may not be correct!
+        let align_fix = block_base & (layout.align() - 1);
+        block_base   += align_fix;
 
-        // This is the pointer that the caller will receive, if we have room.
-        // We got it by indexing into self.buf, so we know it can't be null.
-        let ptr = NonNull::new_unchecked(block_base as *mut u8);
-
-        let block_base_idx = block_base - buf_base;
-        match (block_base_idx, block_base_idx.checked_add(layout.size())) {
-            (block, Some(new_top)) if (block   <  self.buf.len() &&
-                                       new_top <= self.buf.len()) =>
+        // block_idx is the index into our backing buf where this block starts.
+        let block_idx      = self.top + align_fix;
+        // chked_new_top is the overflow-proof end of the newly created block.
+        let chked_new_top  = block_idx.checked_add(layout.size());
+        match (block_idx, chked_new_top) {
+            (index, Some(new_top))
+                // Verify that the block still *starts* in bounds.
+                // Alignment may have adjusted the block out of our range,
+                // in which case we cannot handle this request.
+                if (index < self.buf.len() &&
+                // Verify that the block still *ends* in bounds.
+                // It is OK for new_top to be exactly the same as the buffer length.
+                // This is expected when filling the allocator perfectly.
+                    new_top <= self.buf.len()) =>
             {
-                // Our allocated block is in bounds, and so is the new top!
-                // Everything is good, so let's save our changes and return
-                // the new pointer.
-                self.top = new_top;
+                self.top  = new_top;
                 self.high = self.high.max(self.top);
-                Ok(ptr)
+                Ok(NonNull::new_unchecked(block_base as *mut u8))
             },
             _ => {
                 // We do not have enough space to satisfy this allocation.
@@ -252,7 +266,7 @@ unsafe impl <'a> alloc::Alloc for LinearAlloc<'a> {
         block_size = self.top - block_idx;
         //    2) layout must fit the ptr;
         //       note the new_size argument need not fit it
-        assert_eq!(ptr.as_ptr() as usize % layout.align(), 0,
+        assert!(ptr.as_ptr() as usize % layout.align() == 0,
                    "Pointer does not fit layout.");
         assert!(self.usable_size(&layout).0 <= block_size,
                 "The blocks size is too small?");
@@ -260,7 +274,7 @@ unsafe impl <'a> alloc::Alloc for LinearAlloc<'a> {
         //       (and must be greater than zero),
         assert!(new_size >= layout.size(),
                 "Attempting to \"grow\" an allocation smaller.");
-        assert_ne!(new_size, 0,
+        assert!(new_size != 0,
                 "Attempting to \"grow\" an allocation to zero size.");
 
         let space_left = self.capacity() - self.bytes_in_use();
