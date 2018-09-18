@@ -1,10 +1,23 @@
 #![feature(allocator_api)]
+#![feature(core_intrinsics)]
 
 #![deny(warnings)]
 
 #[cfg(test)]
 #[macro_use]
 extern crate pretty_assertions;
+
+macro_rules! debug_assert2 {
+    ($pred:expr $(, $arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            assert!($pred, $($arg)*);
+        }
+        #[allow(unused_unsafe)]
+        unsafe {
+            ::std::intrinsics::assume($pred);
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Error {

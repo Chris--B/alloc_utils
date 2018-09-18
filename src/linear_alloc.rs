@@ -189,8 +189,8 @@ unsafe impl <'a> alloc::Alloc for LinearAlloc<'a> {
         -> result::Result<NonNull<u8>, alloc::AllocErr>
     {
         // Layout invariants
-        debug_assert!(layout.align() != 0);
-        debug_assert!(layout.align().is_power_of_two());
+        debug_assert2!(layout.align() != 0);
+        debug_assert2!(layout.align().is_power_of_two());
 
         if self.top >= self.buf.len() {
             return Err(alloc::AllocErr);
@@ -251,31 +251,30 @@ unsafe impl <'a> alloc::Alloc for LinearAlloc<'a> {
         -> result::Result<(), alloc::CannotReallocInPlace>
     {
         let block_idx  = self.get_block_idx(ptr);
-        let block_size;
 
         // We assert on these to catch errors quickly, but we do not guard
         // against them because they are *caller* errors.
 
         // The spec for `Alloc::grow_in_place` guarantees:
         //    1) ptr must be currently allocated via this allocator,
-        assert!(block_idx < self.buf.len(),
-                "Pointer is not from this allocator.");
-        assert!(block_idx < self.top,
-                "Pointer has already been freed, or is invalid.");
+        debug_assert2!(block_idx < self.buf.len(),
+                       "Pointer is not from this allocator.");
+        debug_assert2!(block_idx < self.top,
+                       "Pointer has already been freed, or is invalid.");
         // This is guaranteed not to underflow now.
-        block_size = self.top - block_idx;
+        let block_size = self.top - block_idx;
         //    2) layout must fit the ptr;
         //       note the new_size argument need not fit it
-        assert!(ptr.as_ptr() as usize % layout.align() == 0,
-                   "Pointer does not fit layout.");
-        assert!(self.usable_size(&layout).0 <= block_size,
-                "The blocks size is too small?");
+        debug_assert2!((ptr.as_ptr() as usize % layout.align()) == 0,
+                       "Pointer does not fit layout.");
+        debug_assert2!(self.usable_size(&layout).0 <= block_size,
+                       "The blocks size is too small?");
         //    3) new_size must not be greater than layout.size()
         //       (and must be greater than zero),
-        assert!(new_size >= layout.size(),
-                "Attempting to \"grow\" an allocation smaller.");
-        assert!(new_size != 0,
-                "Attempting to \"grow\" an allocation to zero size.");
+        debug_assert2!(new_size >= layout.size(),
+                       "Attempting to \"grow\" an allocation smaller.");
+        debug_assert2!(new_size != 0,
+                       "Attempting to \"grow\" an allocation to zero size.");
 
         let space_left = self.capacity() - self.bytes_in_use();
         // We need at this much additional room in order to grow in place.
