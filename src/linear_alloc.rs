@@ -1,3 +1,5 @@
+//! A basic linear allocator
+
 use core::alloc::{AllocError, Layout};
 use core::marker::PhantomData;
 use core::ptr::NonNull;
@@ -81,7 +83,11 @@ pub struct LinearAlloc<'a> {
     high: usize,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+/// A marker that can be used to reset a [`LinearAlloc`] to a prior state
+///
+/// Get a [`Marker`] from [`LinearAlloc::get_marker()`]. Use [`LinearAlloc::reset_to()`] reset the allocator back to that state.
+/// This will deallocate any allocation made after the [`Marker`] was created.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Marker(usize);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -112,27 +118,30 @@ impl<'a> LinearAlloc<'a> {
         }
     }
 
-    /// Resets the stack completely.
+    /// Resets the stack to its initial state, deallocating all memory allocated from it.
     ///
-    /// This is unsafe because it marks all memory from this allocator as "free",
-    /// even if there are still objects using this memory.
-    /// It is the responsibility of the caller to ensure that this doesn't happen.
+    /// # Safety
+    /// This deallocates all memory allocated from this allocator.
+    ///
+    /// It is undefined behavior to do this while any memory allocated from this allocator is still in use.
+    ///
+    /// Calling this function invalidates existing [`Marker`] objects.
     pub unsafe fn reset(&mut self) {
         self.top = 0;
     }
 
-    /// Resets the stack to a specified location.
+    /// Resets the stack to a specified location, deallocating some memory allocated from it.
     ///
-    /// This is unsafe because it marks all memory from this allocator as "free",
-    /// even if there are still objects using this memory.
-    /// It is the responsibility of the caller to ensure that this doesn't happen.
-    pub unsafe fn reset_to(&mut self, marker: Marker) -> LinearAllocResult<()> {
-        // Don't reset "up"
+    /// # Safety
+    /// This deallocates all memory allocated after `marker` was created.
+    ///
+    /// It is undefined behavior to do this while that memory is still in use.
+    ///
+    /// Calling this function invalidates [`Marker`] objects that compare [`core::cmp::Ordering::Greater`] to `marker`.
+    pub unsafe fn reset_to(&mut self, marker: Marker) {
+        // Don't reset "up" - anything invalid is ignored
         if marker.0 < self.top {
             self.top = marker.0;
-            Ok(())
-        } else {
-            Err(LinearAllocError::InvalidMarker)
         }
     }
 
@@ -311,7 +320,7 @@ mod t {
 
     use super::*;
 
-    use crate::Align4;
+    use crate::align::Align4;
 
     #[test]
     fn check_simple_alloc() {
@@ -402,5 +411,35 @@ mod t {
         }
 
         assert_eq!(alloc.bytes_in_use(), 0);
+    }
+
+    #[test]
+    fn check_marker_ordering() {
+        let mut buf = [0u8; 3 * 8];
+        let mut alloc = LinearAlloc::new(&mut buf);
+        let layout = Layout::new::<u32>();
+
+        unsafe {
+            let marker0 = alloc.get_marker();
+            let _p0 = alloc.alloc(layout).unwrap();
+
+            let marker1 = alloc.get_marker();
+            let _p1 = alloc.alloc(layout).unwrap();
+
+            let marker2 = alloc.get_marker();
+            let _p2 = alloc.alloc(layout).unwrap();
+
+            alloc.dealloc(_p2, layout);
+
+            assert_ne!(marker0, marker1);
+            assert_ne!(marker1, marker2);
+            assert_ne!(marker0, marker2);
+
+            assert!(marker0 < marker1);
+            assert!(marker1 < marker2);
+            assert!(marker0 < marker2);
+        }
+
+        // TODO: Generation/Seq tracking to catch invalidated Markers after an alloc.reset();
     }
 }
