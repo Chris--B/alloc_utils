@@ -23,42 +23,45 @@ impl std::convert::From<core::alloc::AllocError> for Error {
 pub mod linear_alloc;
 pub use linear_alloc::{LinearAlloc, LinearAllocError};
 
-/// An array that is always 2-byte alligned
-#[repr(align(2))]
-pub struct Align2<T, const N: usize>(pub [T; N]);
+/// Wrapper types that are aligned to a specific value
+pub mod align {
+    /// A wapper that is always 2-byte aligned
+    #[repr(align(2))]
+    pub struct Align2<T>(pub T);
 
-/// An array that is always 4-byte alligned
-#[repr(align(4))]
-pub struct Align4<T, const N: usize>(pub [T; N]);
+    /// A wapper that is always 4-byte aligned
+    #[repr(align(4))]
+    pub struct Align4<T>(pub T);
 
-/// An array that is always 8-byte alligned
-#[repr(align(8))]
-pub struct Align8<T, const N: usize>(pub [T; N]);
+    /// A wapper that is always 8-byte aligned
+    #[repr(align(8))]
+    pub struct Align8<T>(pub T);
 
-/// An array that is always 16-byte alligned
-#[repr(align(16))]
-pub struct Align16<T, const N: usize>(pub [T; N]);
+    /// A wapper that is always 16-byte aligned
+    #[repr(align(16))]
+    pub struct Align16<T>(pub T);
 
-/// An array that is always 32-byte alligned
-#[repr(align(32))]
-pub struct Align32<T, const N: usize>(pub [T; N]);
+    /// A wapper that is always 32-byte aligned
+    #[repr(align(32))]
+    pub struct Align32<T>(pub T);
 
-/// An array that is always 64-byte alligned
-#[repr(align(64))]
-pub struct Align64<T, const N: usize>(pub [T; N]);
+    /// A wapper that is always 64-byte aligned
+    #[repr(align(64))]
+    pub struct Align64<T>(pub T);
 
-/// An array that is always 128-byte alligned
-#[repr(align(128))]
-pub struct Align128<T, const N: usize>(pub [T; N]);
+    /// A wapper that is always 128-byte aligned
+    #[repr(align(128))]
+    pub struct Align128<T>(pub T);
 
-/// An array that is always 256-byte alligned
-#[repr(align(256))]
-pub struct Align256<T, const N: usize>(pub [T; N]);
+    /// A wapper that is always 256-byte aligned
+    #[repr(align(256))]
+    pub struct Align256<T>(pub T);
 
-/// An array that is always 512-byte alligned
-#[repr(align(512))]
-pub struct Align512<T, const N: usize>(pub [T; N]);
+    /// A wapper that is always 512-byte aligned
+    #[repr(align(512))]
+    pub struct Align512<T>(pub T);
 
-/// An array that is always 1024-byte alligned
-#[repr(align(1024))]
-pub struct Align1024<T, const N: usize>(pub [T; N]);
+    /// A wapper that is always 1024-byte aligned
+    #[repr(align(1024))]
+    pub struct Align1024<T>(pub T);
+}

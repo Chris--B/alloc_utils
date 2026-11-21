@@ -18,7 +18,8 @@ use core::result;
 /// ```rust
 /// # use std::alloc::*;
 /// # use std::ptr;
-/// # use alloc_utils::{Align8, LinearAlloc};
+/// # use alloc_utils::LinearAlloc;
+/// # use alloc_utils::align::*;
 /// #
 /// // Force the allocator to start on an 8-byte aligned boundary.
 /// let mut buf = Align8([0u8; 24]);
