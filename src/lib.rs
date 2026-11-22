@@ -1,5 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::manual_is_multiple_of, clippy::collapsible_if)]
 
 #[macro_export]
 macro_rules! sizeof {
@@ -31,7 +31,7 @@ impl std::convert::From<core::alloc::AllocError> for Error {
 }
 
 pub mod linear_alloc;
-pub use linear_alloc::{LinearAlloc, LinearAllocError};
+pub use linear_alloc::LinearAlloc;
 
 /// Wrapper types that are aligned to a specific value
 pub mod align {

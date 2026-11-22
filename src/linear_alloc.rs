@@ -1,9 +1,10 @@
 //! A basic linear allocator
 
+use core::alloc::Allocator;
 use core::alloc::{AllocError, Layout};
 use core::marker::PhantomData;
 use core::ptr::NonNull;
-use core::result;
+use core::sync::atomic::{AtomicUsize, Ordering::*};
 
 /// A linear allocator which uses a supplied-slice as backing memory.
 ///
@@ -30,34 +31,33 @@ use core::result;
 /// unsafe {
 ///     use core::alloc::Allocator;
 ///     // Allocate extremely small blocks.
-///     let _ = allocator.alloc(Layout::new::<u8>()).unwrap();
+///     let _ = allocator.allocate(Layout::new::<u8>()).unwrap();
 ///     assert_eq!(allocator.bytes_in_use(), 1);
 ///
 ///     // Allocations are still aligned, and can "waste" space.
 ///     // u16 is 2-byte aligned, so we "waste" a byte.
-///     let _ = allocator.alloc(Layout::new::<u16>()).unwrap();
+///     let _ = allocator.allocate(Layout::new::<u16>()).unwrap();
 ///     assert_eq!(allocator.bytes_in_use(), 4);
 ///
 ///     // Save spots in the stack.
 ///     let marker_at_4 = allocator.get_marker();
 ///
 ///     // Allocating arrays.
-///     let _ = allocator.alloc(Layout::array::<u32>(2).unwrap()).unwrap();
+///     let _ = allocator.allocate(Layout::array::<u32>(2).unwrap()).unwrap();
 ///     assert_eq!(allocator.bytes_in_use(), 12);
 ///
-///     let ptr = allocator.alloc(Layout::new::<u64>()).unwrap();
+///     let ptr = allocator.allocate(Layout::new::<u64>()).unwrap();
 ///     assert_eq!(allocator.bytes_in_use(), 24);
 ///
-///     // Deallocating blocks from the top actually frees them.
-///     allocator.dealloc
-/// (ptr.cast(), Layout::new::<u64>());
-///     assert_eq!(allocator.bytes_in_use(), 16);
-///
-///     // High water mark to see how bad it got.
+/// #   // Deallocating blocks from the top actually frees them.
+/// #   // allocator.deallocate(ptr.cast(), Layout::new::<u64>());
+/// #   // assert_eq!(allocator.bytes_in_use(), 16);
+/// #
+///     // High water mark to see how much we peaked at!
 ///     assert_eq!(allocator.high_water_mark(), 24);
 ///
 ///     // Ooms fail gracefully.
-///     let res = allocator.alloc(Layout::array::<u64>(6).unwrap());
+///     let res = allocator.allocate(Layout::array::<u64>(6).unwrap());
 ///     assert_eq!(res, Err(AllocError));
 ///
 ///     // Restore saved locations.
@@ -71,16 +71,16 @@ use core::result;
 /// ```
 #[derive(Debug)]
 pub struct LinearAlloc<'a> {
-    // The buffer backing allocations
-    start: *mut u8,
-    end: *mut u8,
+    /// The buffer backing our allocations
+    p_buf: NonNull<[u8]>,
 
     buf_ref: PhantomData<&'a [u8]>,
 
-    // The current top of the stack as an index into buf.
-    top: usize,
-    // The high water mark of the allocator, as an index into buf.
-    high: usize,
+    // The top of the stack
+    top: AtomicUsize,
+
+    // The high water mark of the allocator
+    high: AtomicUsize,
 }
 
 /// A marker that can be used to reset a [`LinearAlloc`] to a prior state
@@ -90,30 +90,16 @@ pub struct LinearAlloc<'a> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Marker(usize);
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum LinearAllocError {
-    /// There was an attempt to reset the stack to a marker which is not valid.
-    InvalidMarker,
-
-    CannotReallocInPlace,
-}
-use LinearAllocError::*;
-
-type LinearAllocResult<T> = result::Result<T, LinearAllocError>;
-
 impl<'a> LinearAlloc<'a> {
     /// Create a new linear allocator with a backing buffer.
     pub fn new(buf: &'_ mut [u8]) -> LinearAlloc<'_> {
-        unsafe {
-            let len = buf.len();
-            let start = buf.as_mut_ptr();
-            let end = start.add(len);
+        {
+            let p_buf = NonNull::new(buf as *mut [u8]).unwrap();
             LinearAlloc {
-                start,
-                end,
+                p_buf,
                 buf_ref: PhantomData,
-                top: 0,
-                high: 0,
+                top: AtomicUsize::new(0),
+                high: AtomicUsize::new(0),
             }
         }
     }
@@ -127,7 +113,7 @@ impl<'a> LinearAlloc<'a> {
     ///
     /// Calling this function invalidates existing [`Marker`] objects.
     pub unsafe fn reset(&mut self) {
-        self.top = 0;
+        self.top.store(0, Relaxed);
     }
 
     /// Resets the stack to a specified location, deallocating some memory allocated from it.
@@ -139,32 +125,34 @@ impl<'a> LinearAlloc<'a> {
     ///
     /// Calling this function invalidates [`Marker`] objects that compare [`core::cmp::Ordering::Greater`] to `marker`.
     pub unsafe fn reset_to(&mut self, marker: Marker) {
-        // Don't reset "up" - anything invalid is ignored
-        if marker.0 < self.top {
-            self.top = marker.0;
+        // Note: We'll only reset to a `marker` that's less than our `top`.
+        // Since we're behind a `&mut` here, we expect exclusive access to our fields.
+        let top = self.top.get_mut();
+        if marker.0 < *top {
+            *top = marker.0;
         }
     }
 
     /// Gets a marker that the stack can be reset to later.
     pub fn get_marker(&self) -> Marker {
-        Marker(self.top)
+        Marker(self.top.load(Relaxed))
     }
 
     /// Gets the number of bytes currently allocated.
     pub fn bytes_in_use(&self) -> usize {
-        self.top
+        self.top.load(Relaxed)
     }
 
     /// Gets the base pointer to the entire buffer, without invalidating existing borrows.
-    pub fn get_ptr(&self) -> *mut u8 {
-        self.start
+    pub fn get_ptr(&self) -> NonNull<[u8]> {
+        self.p_buf
     }
 
     /// Gets the length of the backing buffer.
     ///
     /// This is the largest number that `bytes_in_use` can ever return.
     pub fn capacity(&self) -> usize {
-        unsafe { self.end.byte_offset_from_unsigned(self.start) }
+        self.p_buf.len()
     }
 
     /// Gets the "high water mark" of bytes that have been in use by this
@@ -172,206 +160,119 @@ impl<'a> LinearAlloc<'a> {
     ///
     /// This is not reset with calls to `reset()` or `reset_to()`.
     pub fn high_water_mark(&self) -> usize {
-        self.high
+        self.high.load(Relaxed)
     }
+}
 
-    // Gets the index into self.buf at which the given pointer begins.
-    fn get_block_idx(&self, ptr: NonNull<u8>) -> usize {
+unsafe impl Allocator for LinearAlloc<'_> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         unsafe {
-            debug_assert!((self.start..self.end).contains(&(ptr.as_ptr())));
-            ptr.as_ptr().offset_from_unsigned(self.start)
-        }
-    }
-
-    // This function is carefully written! Be careful when making changes.
-    // It has no direct panic calls in release builds.
-    pub unsafe fn alloc(&mut self, layout: Layout) -> result::Result<NonNull<u8>, AllocError> {
-        unsafe {
-            if self.top >= self.capacity() {
-                dbg!();
+            let top = self.top.load(Relaxed);
+            if top >= self.capacity() || !layout.align().is_power_of_two() {
+                // The allocator has run out of space - we cannot handle this request
                 return Err(AllocError);
             }
 
-            // block_base is the address where our new block starts.
-            // It needs to be computed from buf and top, but also adjusted for alignment
-            let mut block_base = self.start.add(self.top);
+            // We attempt to grab a block that will fit our layout, but if someone beats us to it we need to retry
+            // Note: Contention is where dragons live, we need to investigate this.
+
+            // block_base is the address where our new block starts - build it from the top of the current stack.
+            let mut block_base: NonNull<u8> = self.get_ptr().cast::<u8>().offset(top as isize);
+
             let align_fix = block_base.align_offset(layout.align());
-            dbg!(align_fix);
             block_base = block_base.add(align_fix);
 
-            // block_idx is the index into our backing buf where this block starts.
-            let block_idx = self.top + align_fix;
-            // chked_new_top is the overflow-proof end of the newly created block.
-            let chked_new_top = block_idx.checked_add(layout.size());
-            match dbg!(block_idx, chked_new_top) {
-            (index, Some(new_top))
-                // Verify that the block still *starts* in bounds.
-                // Alignment may have adjusted the block out of our range,
-                // in which case we cannot handle this request.
-                if (index < self.capacity() &&
-                // Verify that the block still *ends* in bounds.
-                // It is OK for new_top to be exactly the same as the buffer length.
-                // This is expected when filling the allocator perfectly.
-                    new_top <= self.capacity()) =>
+            let new_top = top + align_fix + layout.size();
+            if new_top > self.capacity() {
+                // This block would be too large to fit - we cannot handle this request
+                return Err(AllocError);
+            }
+
+            // Nothing we read or write is dependent on this updated top, so we use Relaxed ordering.
+            if self
+                .top
+                .compare_exchange(top, new_top, Relaxed, Relaxed)
+                .is_ok()
             {
-                self.top  = new_top;
-                self.high = self.high.max(self.top);
-                Ok(NonNull::new_unchecked(block_base))
-            },
-            _ => {
-                // We do not have enough space to satisfy this allocation.
-                dbg!();
-                Err(AllocError)
-            },
-        }
+                // Our high watermark is just book keeping and nothing depends on it, so we use Relaxed ordering.
+                self.high.fetch_max(new_top, Relaxed);
+
+                return Ok(NonNull::slice_from_raw_parts(block_base, layout.size()));
+            }
+
+            // Contention! We should retry I guess?
+            unimplemented!("contended case not handled")
         }
     }
 
-    pub unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
-        // Because we return tight bounds in alloc(),
-        // we can assume that this `layout` struct is exactly the size of our
-        // block.
-
-        // If our block is at the top of the stack, we can free it.
-        let block_idx = self.get_block_idx(ptr);
-        if block_idx + layout.size() == self.top {
-            self.top = block_idx;
-        }
-        // Anything else... and we can't.
-    }
-
-    pub unsafe fn grow_in_place(
-        &mut self,
-        ptr: NonNull<u8>,
-        layout: Layout,
-        new_size: usize,
-    ) -> LinearAllocResult<()> {
-        let block_idx = self.get_block_idx(ptr);
-
-        // We assert on these to catch errors quickly, but we do not guard
-        // against them because they are *caller* errors.
-
-        // The spec for `Alloc::grow_in_place` guarantees:
-        //    1) ptr must be currently allocated via this allocator,
-        assert!(
-            block_idx < self.capacity(),
-            "Pointer is not from this allocator."
-        );
-        assert!(
-            block_idx < self.top,
-            "Pointer has already been freed, or is invalid."
-        );
-        // This is guaranteed not to underflow now.
-        let block_size = self.top - block_idx;
-        //    2) layout must fit the ptr;
-        //       note the new_size argument need not fit it
-        assert!(
-            ptr.as_ptr() as usize % layout.align() == 0,
-            "Pointer does not fit layout."
-        );
-        assert!(layout.size() <= block_size, "The blocks size is too small?");
-        //    3) new_size must not be greater than layout.size()
-        //       (and must be greater than zero),
-        assert!(
-            new_size >= layout.size(),
-            "Attempting to \"grow\" an allocation smaller."
-        );
-        assert!(
-            new_size != 0,
-            "Attempting to \"grow\" an allocation to zero size."
-        );
-
-        let space_left = self.capacity() - self.bytes_in_use();
-        // We need at this much additional room in order to grow in place.
-        let block_growth = new_size - layout.size();
-        if space_left < block_growth {
-            return Err(CannotReallocInPlace);
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        #[cfg(test)]
+        {
+            println!("[{:?}] dealloc {ptr:?} {layout:?}", self.p_buf);
         }
 
-        // This wasn't the last block allocated, so we can't grow it in place.
-        // Note: This test does not account for padding due to the alignment of
-        //       a previous allocation that has since been freed.
-        if block_idx + layout.size() != self.top {
-            return Err(CannotReallocInPlace);
-        }
-
-        // Now we know that
-        //      1) self.buf has enough room, and
-        //      2) The block in question is at the top of the stack
-        // So we can go ahead and bump self.top and call it success.
-        self.top += block_growth;
-        Ok(())
-    }
-
-    // ----- This may be useful to implement later. ----------------------------
-    #[allow(unused)]
-    unsafe fn shrink_in_place(
-        &mut self,
-        _ptr: NonNull<u8>,
-        _layout: Layout,
-        _new_size: usize,
-    ) -> LinearAllocResult<()> {
-        Err(CannotReallocInPlace)
+        // dealloc is a no-op. Use the `Marker` API to reset the allocator
+        // TODO: Can we dealloc a block if it's at the top?
+        let _ = (ptr, layout);
     }
 }
 
 #[cfg(test)]
 mod t {
-
     use super::*;
 
     use crate::align::Align4;
 
     #[test]
-    fn check_simple_alloc() {
-        let mut buf = Align4([0u8; 2 * core::mem::size_of::<u32>()]);
+    fn check_simple_allocate() {
+        let mut buf = Align4([0u8; 2 * sizeof!(u32)]);
         let buf = &mut buf.0;
-        let mut alloc = LinearAlloc::new(buf);
+        let alloc = LinearAlloc::new(buf);
 
         let layout = Layout::new::<u32>();
         assert_eq!(2 * layout.size(), alloc.capacity());
 
         // We expect two allocations to work, and then two to fail.
         // Failure should *not* abort the test!
-        // unsafe due to calls to alloc::Alloc::alloc().
-        let ptrs: [NonNull<u8>; 2];
-        unsafe {
-            let ptr_0 = alloc.alloc(layout);
-            assert_eq!(
-                ptr_0.err(),
-                None,
-                "alloc 1/4 failed, but should have worked"
-            );
+        // unsafe due to calls to alloc::Alloc::allocate().
+        let ptr_0 = alloc.allocate(layout);
+        assert_eq!(
+            ptr_0.err(),
+            None,
+            "alloc 1/4 failed, but should have worked"
+        );
 
-            let ptr_1 = alloc.alloc(layout);
-            assert_eq!(
-                ptr_1.err(),
-                None,
-                "alloc 2/4 failed, but should have worked"
-            );
-            assert_eq!(
-                alloc.alloc(layout).err(),
-                Some(AllocError),
-                "alloc 3/4 worked, but should have failed"
-            );
-            assert_eq!(
-                alloc.alloc(layout).err(),
-                Some(AllocError),
-                "alloc 4/4 worked, but should have failed"
-            );
+        let ptr_1 = alloc.allocate(layout);
+        assert_eq!(
+            ptr_1.err(),
+            None,
+            "alloc 2/4 failed, but should have worked"
+        );
+        assert_eq!(
+            alloc.allocate(layout).err(),
+            Some(AllocError),
+            "alloc 3/4 worked, but should have failed"
+        );
+        assert_eq!(
+            alloc.allocate(layout).err(),
+            Some(AllocError),
+            "alloc 4/4 worked, but should have failed"
+        );
 
-            ptrs = [ptr_0.unwrap(), ptr_1.unwrap()];
+        let ptrs: [NonNull<u32>; 2] = [ptr_0.unwrap().cast(), ptr_1.unwrap().cast()];
 
-            assert_ne!(NonNull::dangling(), ptrs[0]);
-            assert_ne!(NonNull::dangling(), ptrs[1]);
-            assert_ne!(ptrs[0], ptrs[1]);
-        }
+        assert_ne!(NonNull::dangling(), ptrs[0]);
+        assert_ne!(NonNull::dangling(), ptrs[1]);
+        assert_ne!(ptrs[0], ptrs[1]);
 
         unsafe {
             // If we construct this pointer through a new `&mut ` from `buf`, it invalidates
             // the existing pointers and is UB.
             // The sort of UB that never actually breaks, but does fail Miri.
-            let p_buf = alloc.get_ptr();
+            let p_buf: NonNull<[u8]> = alloc.get_ptr();
+            assert!(p_buf.len() >= 4);
+            let p_buf: NonNull<u32> = p_buf.cast();
+            assert!(p_buf.is_aligned());
 
             ptrs[0].write(23);
             assert_eq!(ptrs[0].read(), p_buf.add(0).read());
@@ -380,66 +281,139 @@ mod t {
             assert_eq!(ptrs[0].read(), p_buf.add(0).read());
 
             ptrs[1].write(23);
-            assert_eq!(ptrs[1].read(), p_buf.add(4).read());
+            assert_eq!(ptrs[1].read(), p_buf.add(1).read());
 
             ptrs[1].write(45);
-            assert_eq!(ptrs[1].read(), p_buf.add(4).read());
+            assert_eq!(ptrs[1].read(), p_buf.add(1).read());
         }
-    }
-
-    #[test]
-    fn check_in_place_realloc() {
-        let mut buf = [0u8; 3 * 8];
-        let mut alloc = LinearAlloc::new(&mut buf);
-
-        // Unsafe because of calls to alloc
-        unsafe {
-            let layout = Layout::new::<[u8; 8]>();
-            let p_first = alloc.alloc(layout).expect("Couldn't alloc [0, 8]");
-            let p_second = alloc.alloc(layout).expect("Couldn't alloc [8, 16]");
-
-            let new_layout = Layout::new::<[u8; 16]>();
-            alloc
-                .grow_in_place(p_second, layout, 16)
-                .expect("Couldn't grow in place from [8, 16] to [8, 24]");
-            alloc.dealloc(p_second, new_layout);
-
-            alloc
-                .grow_in_place(p_first, layout, 16)
-                .expect("Couldn't grow in place from [0, 8] to [0, 16]");
-            alloc.dealloc(p_first, new_layout);
-        }
-
-        assert_eq!(alloc.bytes_in_use(), 0);
     }
 
     #[test]
     fn check_marker_ordering() {
-        let mut buf = [0u8; 3 * 8];
-        let mut alloc = LinearAlloc::new(&mut buf);
+        let mut buf = Align4([0u8; 3 * 8]);
+        let mut alloc = LinearAlloc::new(&mut buf.0);
         let layout = Layout::new::<u32>();
 
-        unsafe {
-            let marker0 = alloc.get_marker();
-            let _p0 = alloc.alloc(layout).unwrap();
+        let marker0 = alloc.get_marker();
+        let _p0 = alloc.allocate(layout).unwrap();
 
-            let marker1 = alloc.get_marker();
-            let _p1 = alloc.alloc(layout).unwrap();
+        let marker1 = alloc.get_marker();
+        let _p1 = alloc.allocate(layout).unwrap();
 
-            let marker2 = alloc.get_marker();
-            let _p2 = alloc.alloc(layout).unwrap();
+        let marker2 = alloc.get_marker();
+        let _p2 = alloc.allocate(layout).unwrap();
 
-            alloc.dealloc(_p2, layout);
+        assert!(alloc.bytes_in_use() >= 3 * sizeof!(u32));
 
-            assert_ne!(marker0, marker1);
-            assert_ne!(marker1, marker2);
-            assert_ne!(marker0, marker2);
+        assert_ne!(marker0, marker1);
+        assert_ne!(marker1, marker2);
+        assert_ne!(marker0, marker2);
 
-            assert!(marker0 < marker1);
-            assert!(marker1 < marker2);
-            assert!(marker0 < marker2);
-        }
+        assert!(marker0 < marker1);
+        assert!(marker1 < marker2);
+        assert!(marker0 < marker2);
 
         // TODO: Generation/Seq tracking to catch invalidated Markers after an alloc.reset();
+        unsafe {
+            alloc.reset();
+        }
+    }
+
+    #[test]
+    fn check_many_pushes_work() {
+        let mut buf = Align4([0_u8; 10 * sizeof!(i32)]);
+        let alloc = LinearAlloc::new(&mut buf.0);
+        let mut v = Vec::<u32, &LinearAlloc>::new_in(&alloc);
+
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        v.push(4);
+
+        println!("bytes_in_use={}", alloc.bytes_in_use());
+        println!("high_water_mark={}", alloc.high_water_mark());
+        assert!(alloc.high_water_mark() > 0);
+        assert!(alloc.bytes_in_use() >= 4 * sizeof!(i32));
+        assert_eq!(v.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn check_many_pushes_all_work_and_reset_behaves_well() {
+        let mut buf = Align4([0_u8; 10 * sizeof!(i32)]);
+        let mut alloc = LinearAlloc::new(&mut buf.0);
+
+        unsafe {
+            for i in 0..2 {
+                println!("[{i}] Resetting alloc");
+                alloc.reset();
+                let mut v = Vec::<u32, &LinearAlloc>::new_in(&alloc);
+
+                v.push(1);
+                v.push(2);
+                v.push(3);
+                v.push(4);
+
+                println!("[{i}] bytes_in_use={}", alloc.bytes_in_use());
+                println!("[{i}] high_water_mark={}", alloc.high_water_mark());
+                assert!(alloc.high_water_mark() > 0);
+                assert!(alloc.bytes_in_use() >= 4 * sizeof!(i32));
+                assert_eq!(v.as_slice(), &[1, 2, 3, 4]);
+            }
+        }
+    }
+
+    #[test]
+    fn check_two_vectors_one_alloc() {
+        let mut buf = Align4([0u8; 30 * sizeof!(i32)]);
+        let alloc = LinearAlloc::new(&mut buf.0);
+        let mut v = Vec::<u32, &LinearAlloc>::new_in(&alloc);
+        let mut w = Vec::<u32, &LinearAlloc>::new_in(&alloc);
+
+        fn print_buf(a: &LinearAlloc) -> [i32; 14] {
+            unsafe {
+                let a: core::ptr::NonNull<u8> = a.get_ptr().cast();
+                let a: *mut u8 = a.as_ptr();
+                let mut b = [0_i32; 14];
+
+                core::ptr::copy(a, b.as_mut_ptr() as *mut u8, b.len() * sizeof!(i32));
+
+                b
+            }
+        }
+
+        println!("[]   {:?}", print_buf(&alloc));
+
+        v.push(1);
+        println!("[1]  {:?}", print_buf(&alloc));
+        w.push(11);
+        println!("[11] {:?}", print_buf(&alloc));
+        println!();
+
+        v.push(2);
+        println!("[2]  {:?}", print_buf(&alloc));
+        w.push(22);
+        println!("[22] {:?}", print_buf(&alloc));
+        println!();
+
+        v.push(3);
+        println!("[3]  {:?}", print_buf(&alloc));
+        w.push(33);
+        println!("[33] {:?}", print_buf(&alloc));
+        println!();
+
+        v.push(4);
+        println!("[4]  {:?}", print_buf(&alloc));
+        w.push(44);
+        println!("[44] {:?}", print_buf(&alloc));
+        println!();
+
+        v.push(5);
+        println!("[5]  {:?}", print_buf(&alloc));
+        w.push(55);
+        println!("[55] {:?}", print_buf(&alloc));
+        println!();
+
+        assert_eq!(&[1, 2, 3, 4, 5], v.as_slice());
+        assert_eq!(&[11, 22, 33, 44, 55], w.as_slice());
     }
 }
