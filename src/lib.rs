@@ -1,6 +1,16 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::manual_is_multiple_of)]
 
+#[macro_export]
+macro_rules! sizeof {
+    ($t:ty) => {
+        ::core::mem::size_of::<$t>()
+    };
+    ($e:expr) => {
+        ::core::mem::size_of_val(&$e)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Error {
     LayoutErr(core::alloc::LayoutError),
@@ -64,4 +74,13 @@ pub mod align {
     /// A wapper that is always 1024-byte aligned
     #[repr(align(1024))]
     pub struct Align1024<T>(pub T);
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn check_sizeof() {
+        assert_eq!(sizeof!(u32), core::mem::size_of::<u32>());
+        assert_eq!(sizeof!(0_u32), core::mem::size_of_val(&(0_u32)));
+    }
 }
