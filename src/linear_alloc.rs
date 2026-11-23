@@ -164,44 +164,58 @@ impl<'a> LinearAlloc<'a> {
     }
 }
 
+unsafe impl Sync for LinearAlloc<'_> {}
+unsafe impl Send for LinearAlloc<'_> {}
+
+impl Drop for LinearAlloc<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            // Mark all of our allocations as freed
+            self.reset();
+        }
+    }
+}
+
 unsafe impl Allocator for LinearAlloc<'_> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         unsafe {
-            let top = self.top.load(Relaxed);
-            if top >= self.capacity() || !layout.align().is_power_of_two() {
+            if self.top.load(Relaxed) >= self.capacity() || !layout.align().is_power_of_two() {
                 // The allocator has run out of space - we cannot handle this request
                 return Err(AllocError);
             }
 
             // We attempt to grab a block that will fit our layout, but if someone beats us to it we need to retry
             // Note: Contention is where dragons live, we need to investigate this.
+            loop {
+                let top = self.top.load(Relaxed);
 
-            // block_base is the address where our new block starts - build it from the top of the current stack.
-            let mut block_base: NonNull<u8> = self.get_ptr().cast::<u8>().offset(top as isize);
+                // block_base is the address where our new block starts - build it from the top of the current stack.
+                let mut block_base: NonNull<u8> = self.get_ptr().cast::<u8>().offset(top as isize);
 
-            let align_fix = block_base.align_offset(layout.align());
-            block_base = block_base.add(align_fix);
+                let align_fix = block_base.align_offset(layout.align());
+                block_base = block_base.add(align_fix);
 
-            let new_top = top + align_fix + layout.size();
-            if new_top > self.capacity() {
-                // This block would be too large to fit - we cannot handle this request
-                return Err(AllocError);
+                let new_top = top + align_fix + layout.size();
+                if new_top > self.capacity() {
+                    // This block would be too large to fit - we cannot handle this request
+                    return Err(AllocError);
+                }
+
+                // Nothing we read or write is dependent on this updated top, so we use Relaxed ordering.
+                if self
+                    .top
+                    .compare_exchange(top, new_top, Relaxed, Relaxed)
+                    .is_ok()
+                {
+                    // Our high watermark is just book keeping and nothing depends on it, so we use Relaxed ordering.
+                    self.high.fetch_max(new_top, Relaxed);
+
+                    return Ok(NonNull::slice_from_raw_parts(block_base, layout.size()));
+                } else {
+                    // Try again...?
+                    continue;
+                }
             }
-
-            // Nothing we read or write is dependent on this updated top, so we use Relaxed ordering.
-            if self
-                .top
-                .compare_exchange(top, new_top, Relaxed, Relaxed)
-                .is_ok()
-            {
-                // Our high watermark is just book keeping and nothing depends on it, so we use Relaxed ordering.
-                self.high.fetch_max(new_top, Relaxed);
-
-                return Ok(NonNull::slice_from_raw_parts(block_base, layout.size()));
-            }
-
-            // Contention! We should retry I guess?
-            unimplemented!("contended case not handled")
         }
     }
 
@@ -219,6 +233,8 @@ unsafe impl Allocator for LinearAlloc<'_> {
 
 #[cfg(test)]
 mod t {
+    use std::sync::Barrier;
+
     use super::*;
 
     use crate::align::Align4;
@@ -316,6 +332,73 @@ mod t {
         // TODO: Generation/Seq tracking to catch invalidated Markers after an alloc.reset();
         unsafe {
             alloc.reset();
+        }
+    }
+
+    #[test]
+    fn check_multi_thread_usage() {
+        let n_threads = 6;
+        let n = 100;
+        let layout = Layout::for_value(&0_u64);
+
+        let mut buf = vec![u64::MAX; n_threads * n];
+        println!("Note: buf.len() == {}", buf.len());
+
+        // Guarantee that our heap buffer is 8-byte aligned. (A simple vec![0_u8; N] is random and changes run to run)
+        let buf: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len() * sizeof!(u64))
+        };
+        let alloc = LinearAlloc::new(buf);
+
+        let start = Barrier::new(n_threads);
+        std::thread::scope(|s| {
+            let start = &start;
+            for t in 0..n_threads {
+                assert!(t < 256);
+                let alloc = &alloc;
+                s.spawn(move || {
+                    start.wait();
+                    for i in 0..n {
+                        unsafe {
+                            let mut ptr: NonNull<[u8]> =
+                                alloc.allocate(layout).unwrap_or_else(|e| {
+                                    panic!("Failed to allocate thread {t}, int {i}: {e:?}")
+                                });
+                            ptr.as_mut().fill(t as u8);
+                        }
+                    }
+                });
+            }
+        });
+
+        assert_eq!(alloc.bytes_in_use(), n_threads * n * layout.size());
+        drop(alloc);
+
+        // We can't predict the order that allocations are handed out to each thread, but we can verify they never overlap.
+        // That means each allocation is a string of bytes with the same value (our thread id), repeated sizeof!(u64) times.
+        // If the run count is ever not a clean multiple of sizeof!(u64), then the allocations from competiting threads overlapped.
+        let mut run: usize = 0;
+        let mut last: u8 = buf[0];
+        for (i, &b) in buf.iter().enumerate() {
+            if b == last {
+                run += 1;
+            } else {
+                println!("[{last}] {run} ({}) -> {b}", run / sizeof!(u64));
+                if run % sizeof!(u64) != 0 {
+                    let s = (i - run).saturating_sub(2);
+                    let e = (i + 1).min(buf.len() - 1);
+                    println!("run = {run}");
+                    println!("buf[..]: {:?}", &buf[s..e]);
+                    panic!("Some allocations stomped each other!");
+                }
+                run = 1;
+                last = b;
+            }
+            assert_ne!(
+                b,
+                u8::MAX,
+                "Unexpected padding in allocation buffer at offset {i}"
+            );
         }
     }
 
