@@ -1,5 +1,7 @@
 //! A basic linear allocator
 
+use crate::asan::*;
+
 use core::alloc::Allocator;
 use core::alloc::{AllocError, Layout};
 use core::marker::PhantomData;
@@ -93,14 +95,16 @@ pub struct Marker(usize);
 impl<'a> LinearAlloc<'a> {
     /// Create a new linear allocator with a backing buffer.
     pub fn new(buf: &'_ mut [u8]) -> LinearAlloc<'_> {
-        {
-            let p_buf = NonNull::new(buf as *mut [u8]).unwrap();
-            LinearAlloc {
-                p_buf,
-                buf_ref: PhantomData,
-                top: AtomicUsize::new(0),
-                high: AtomicUsize::new(0),
-            }
+        let p_buf = NonNull::new(buf as *mut [u8]).unwrap();
+        unsafe {
+            asan_poison_memory_region(p_buf);
+        }
+
+        LinearAlloc {
+            p_buf,
+            buf_ref: PhantomData,
+            top: AtomicUsize::new(0),
+            high: AtomicUsize::new(0),
         }
     }
 
@@ -114,6 +118,9 @@ impl<'a> LinearAlloc<'a> {
     /// Calling this function invalidates existing [`Marker`] objects.
     pub unsafe fn reset(&mut self) {
         self.top.store(0, Relaxed);
+        unsafe {
+            asan_poison_memory_region(self.p_buf);
+        }
     }
 
     /// Resets the stack to a specified location, deallocating some memory allocated from it.
@@ -124,12 +131,20 @@ impl<'a> LinearAlloc<'a> {
     /// It is undefined behavior to do this while that memory is still in use.
     ///
     /// Calling this function invalidates [`Marker`] objects that compare [`core::cmp::Ordering::Greater`] to `marker`.
+    // TODO: Test reset_to()
     pub unsafe fn reset_to(&mut self, marker: Marker) {
         // Note: We'll only reset to a `marker` that's less than our `top`.
         // Since we're behind a `&mut` here, we expect exclusive access to our fields.
         let top = self.top.get_mut();
-        if marker.0 < *top {
-            *top = marker.0;
+        let marker = marker.0;
+        if marker < *top {
+            unsafe {
+                let freed_start = self.p_buf.cast().add(marker);
+                let freed_size = *top - marker;
+                let region = NonNull::slice_from_raw_parts(freed_start, freed_size);
+                asan_poison_memory_region(region);
+            }
+            *top = marker;
         }
     }
 
@@ -139,6 +154,8 @@ impl<'a> LinearAlloc<'a> {
     }
 
     /// Gets the number of bytes currently allocated.
+    ///
+    /// Note: This counts padding bytes as allocated
     pub fn bytes_in_use(&self) -> usize {
         self.top.load(Relaxed)
     }
@@ -170,8 +187,9 @@ unsafe impl Send for LinearAlloc<'_> {}
 impl Drop for LinearAlloc<'_> {
     fn drop(&mut self) {
         unsafe {
-            // Mark all of our allocations as freed
-            self.reset();
+            // All allocations are now freed, but we're returning ownership of the backing memory and need to unpoison it
+            self.top.store(0, Relaxed);
+            asan_unpoison_memory_region(self.p_buf);
         }
     }
 }
@@ -210,7 +228,10 @@ unsafe impl Allocator for LinearAlloc<'_> {
                     // Our high watermark is just book keeping and nothing depends on it, so we use Relaxed ordering.
                     self.high.fetch_max(new_top, Relaxed);
 
-                    return Ok(NonNull::slice_from_raw_parts(block_base, layout.size()));
+                    let region = NonNull::slice_from_raw_parts(block_base, layout.size());
+                    asan_unpoison_memory_region(region);
+
+                    return Ok(region);
                 } else {
                     // Try again...?
                     continue;
@@ -221,8 +242,19 @@ unsafe impl Allocator for LinearAlloc<'_> {
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         #[cfg(test)]
-        {
-            println!("[{:?}] dealloc {ptr:?} {layout:?}", self.p_buf);
+        unsafe {
+            println!(
+                "[0x{base:x?}] dealloc {ptr:?} ({offset:>3}) {size} bytes, {aligned} aligned",
+                base = self.p_buf.addr(),
+                offset = ptr.offset_from_unsigned(self.p_buf.cast()),
+                size = layout.size(),
+                aligned = layout.align()
+            );
+        }
+
+        unsafe {
+            let region = NonNull::slice_from_raw_parts(ptr, layout.size());
+            asan_poison_memory_region(region);
         }
 
         // dealloc is a no-op. Use the `Marker` API to reset the allocator
@@ -237,51 +269,94 @@ mod t {
 
     use super::*;
 
-    use crate::align::Align4;
+    use crate::align::*;
+
+    fn u32_is_not_poisoned(addr: NonNull<u32>) -> bool {
+        unsafe {
+            let region = NonNull::slice_from_raw_parts(addr.cast(), sizeof!(u32));
+            asan_region_is_poisoned(region).is_none()
+        }
+    }
+
+    fn print_backing_buffer(a: &LinearAlloc) {
+        unsafe {
+            // For these tests, we do actually want to read everything. Bluntly, blindly unpoison everything the allocator owns.
+            asan_unpoison_memory_region(a.get_ptr());
+
+            let p: core::ptr::NonNull<u8> = a.get_ptr().cast();
+            let b = core::slice::from_raw_parts(p.as_ptr(), a.capacity());
+
+            for b in b.iter() {
+                print!("{b:02x}");
+            }
+        }
+    }
+
+    fn print_poisoned_bytes(alloc: &LinearAlloc<'_>) -> usize {
+        let mut count = 0;
+
+        unsafe {
+            let region = alloc.get_ptr();
+            eprintln!("{region:?}");
+            for off in 0..region.len() {
+                if asan_address_is_poisoned(region.cast().add(off)) {
+                    print!("{:02}", "x");
+                    count += 1;
+                } else {
+                    print!("{:02}", ".");
+                }
+            }
+        }
+
+        count
+    }
 
     #[test]
     fn check_simple_allocate() {
-        let mut buf = Align4([0u8; 2 * sizeof!(u32)]);
-        let buf = &mut buf.0;
-        let alloc = LinearAlloc::new(buf);
-
-        let layout = Layout::new::<u32>();
-        assert_eq!(2 * layout.size(), alloc.capacity());
-
-        // We expect two allocations to work, and then two to fail.
-        // Failure should *not* abort the test!
-        // unsafe due to calls to alloc::Alloc::allocate().
-        let ptr_0 = alloc.allocate(layout);
-        assert_eq!(
-            ptr_0.err(),
-            None,
-            "alloc 1/4 failed, but should have worked"
-        );
-
-        let ptr_1 = alloc.allocate(layout);
-        assert_eq!(
-            ptr_1.err(),
-            None,
-            "alloc 2/4 failed, but should have worked"
-        );
-        assert_eq!(
-            alloc.allocate(layout).err(),
-            Some(AllocError),
-            "alloc 3/4 worked, but should have failed"
-        );
-        assert_eq!(
-            alloc.allocate(layout).err(),
-            Some(AllocError),
-            "alloc 4/4 worked, but should have failed"
-        );
-
-        let ptrs: [NonNull<u32>; 2] = [ptr_0.unwrap().cast(), ptr_1.unwrap().cast()];
-
-        assert_ne!(NonNull::dangling(), ptrs[0]);
-        assert_ne!(NonNull::dangling(), ptrs[1]);
-        assert_ne!(ptrs[0], ptrs[1]);
-
         unsafe {
+            let mut buf = Align4([0u8; 2 * sizeof!(u32)]);
+            let buf = &mut buf.0;
+            let alloc = LinearAlloc::new(buf);
+
+            let layout = Layout::new::<u32>();
+            assert_eq!(2 * layout.size(), alloc.capacity());
+
+            // We expect two allocations to work, and then two to fail.
+            // Failure should *not* abort the test!
+            let ptr_0 = alloc.allocate(layout);
+            assert_eq!(
+                ptr_0.err(),
+                None,
+                "alloc 1/4 failed, but should have worked"
+            );
+            let ptr_0: NonNull<u32> = ptr_0.unwrap().cast();
+            assert_ne!(NonNull::dangling(), ptr_0);
+            assert!(u32_is_not_poisoned(ptr_0));
+
+            let ptr_1 = alloc.allocate(layout);
+            assert_eq!(
+                ptr_1.err(),
+                None,
+                "alloc 2/4 failed, but should have worked"
+            );
+            let ptr_1: NonNull<u32> = ptr_1.unwrap().cast();
+            assert_ne!(NonNull::dangling(), ptr_1);
+            assert!(u32_is_not_poisoned(ptr_1));
+
+            assert_eq!(
+                alloc.allocate(layout).err(),
+                Some(AllocError),
+                "alloc 3/4 worked, but should have failed"
+            );
+            assert_eq!(
+                alloc.allocate(layout).err(),
+                Some(AllocError),
+                "alloc 4/4 worked, but should have failed"
+            );
+
+            let ptrs: [NonNull<u32>; 2] = [ptr_0, ptr_1];
+            assert_ne!(ptrs[0], ptrs[1]);
+
             // If we construct this pointer through a new `&mut ` from `buf`, it invalidates
             // the existing pointers and is UB.
             // The sort of UB that never actually breaks, but does fail Miri.
@@ -452,51 +527,116 @@ mod t {
         let mut v = Vec::<u32, &LinearAlloc>::new_in(&alloc);
         let mut w = Vec::<u32, &LinearAlloc>::new_in(&alloc);
 
-        fn print_buf(a: &LinearAlloc) -> [i32; 14] {
-            unsafe {
-                let a: core::ptr::NonNull<u8> = a.get_ptr().cast();
-                let a: *mut u8 = a.as_ptr();
-                let mut b = [0_i32; 14];
-
-                core::ptr::copy(a, b.as_mut_ptr() as *mut u8, b.len() * sizeof!(i32));
-
-                b
-            }
-        }
-
-        println!("[]   {:?}", print_buf(&alloc));
+        print!("[]   ");
+        print_backing_buffer(&alloc);
 
         v.push(1);
-        println!("[1]  {:?}", print_buf(&alloc));
+        print!("[1]  ");
+        print_backing_buffer(&alloc);
+
         w.push(11);
-        println!("[11] {:?}", print_buf(&alloc));
+        print!("[11] ");
+        print_backing_buffer(&alloc);
+
         println!();
 
         v.push(2);
-        println!("[2]  {:?}", print_buf(&alloc));
+        print!("[2]  ");
+        print_backing_buffer(&alloc);
+
         w.push(22);
-        println!("[22] {:?}", print_buf(&alloc));
+        print!("[22] ");
+        print_backing_buffer(&alloc);
+
         println!();
 
         v.push(3);
-        println!("[3]  {:?}", print_buf(&alloc));
+        print!("[3]  ");
+        print_backing_buffer(&alloc);
+
         w.push(33);
-        println!("[33] {:?}", print_buf(&alloc));
+        print!("[33] ");
+        print_backing_buffer(&alloc);
+
         println!();
 
         v.push(4);
-        println!("[4]  {:?}", print_buf(&alloc));
+        print!("[4]  ");
+        print_backing_buffer(&alloc);
+
         w.push(44);
-        println!("[44] {:?}", print_buf(&alloc));
+        print!("[44] ");
+        print_backing_buffer(&alloc);
+
         println!();
 
         v.push(5);
-        println!("[5]  {:?}", print_buf(&alloc));
+        print!("[5]  ");
+        print_backing_buffer(&alloc);
+
         w.push(55);
-        println!("[55] {:?}", print_buf(&alloc));
+        print!("[55] ");
+        print_backing_buffer(&alloc);
+
         println!();
 
         assert_eq!(&[1, 2, 3, 4, 5], v.as_slice());
         assert_eq!(&[11, 22, 33, 44, 55], w.as_slice());
+    }
+
+    #[cfg_attr(not(asan), ignore)]
+    #[test]
+    fn check_buffer_is_poisoned() {
+        // Aggressively aligned to make sure we have padding bytes between allocations.
+        let mut buf = Align16([0xFFu8; 16 * sizeof!(i32)]);
+        let mut alloc = LinearAlloc::new(&mut buf.0);
+
+        fn log_top(a: &LinearAlloc<'_>) {
+            println!("+ top = {}", a.bytes_in_use());
+        }
+
+        log_top(&alloc);
+
+        {
+            let _b = Box::new_in(0_u32, &alloc);
+            log_top(&alloc);
+
+            let _b = Box::new_in(1_u8, &alloc);
+            log_top(&alloc);
+
+            let _b = Box::new_in(2_u32, &alloc);
+            log_top(&alloc);
+
+            let _b = Box::new_in(3_u64, &alloc);
+            log_top(&alloc);
+
+            let _b = Box::new_in(4_u8, &alloc);
+            log_top(&alloc);
+
+            let _b = Box::new_in(5_u64, &alloc);
+            log_top(&alloc);
+
+            // At this point, before the Box's above drop, we expect to see this logged:
+            //      Poisoned?   : [ . . . . . x x x . . . . x x x x . . . . . . . . . x x x x x x x . . . . . . . . x x x x x x x x x x x x x x x x x x x x x x x x  ]
+            //      Bytes       : [ 0000000001ffffff02000000ffffffff030000000000000004ffffffffffffff0500000000000000ffffffffffffffffffffffffffffffffffffffffffffffff ]
+            // Which is 38 poisoned bytes
+            print!("{:<12}: [ ", "Poisoned?");
+            let num_poisoned = print_poisoned_bytes(&alloc);
+            println!(" ]");
+
+            print!("{:<12}: [ ", "Bytes");
+            print_backing_buffer(&alloc);
+            println!(" ]");
+
+            assert_eq!(num_poisoned, 38);
+        }
+
+        unsafe {
+            alloc.reset();
+        }
+
+        print!("{:<12}: [ ", "Poisoned?");
+        assert_eq!(print_poisoned_bytes(&alloc), alloc.capacity());
+        println!(" ]");
     }
 }

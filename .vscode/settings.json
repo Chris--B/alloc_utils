@@ -1,0 +1,10 @@
+{
+  "rust-analyzer.cargo.cfgs": [
+    "debug_assertions",
+    "miri",
+    "asan"
+  ],
+  "rust-analyzer.cargo.extraEnv": {
+    "RUSTFLAGS": "--cfg asan"
+  }
+}
