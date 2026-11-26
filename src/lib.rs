@@ -33,6 +33,8 @@ impl std::convert::From<core::alloc::AllocError> for Error {
 pub mod linear_alloc;
 pub use linear_alloc::LinearAlloc;
 
+pub mod asan;
+
 /// Wrapper types that are aligned to a specific value
 pub mod align {
     /// A wapper that is always 2-byte aligned

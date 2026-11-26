@@ -8,3 +8,10 @@ edition = "2024"
 
 [dev-dependencies]
 pretty_assertions = '*'
+
+[profile.release]
+debug = true
+
+[lints.rust]
+# [cfg(sanitize="address")] is nightly, so we'll require manually enabling --cfg asan until then
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(asan)"] }
